@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, "1.74"]
+        rust: [stable, "1.75"]
         features:
           - "--no-default-features"
           - ""
