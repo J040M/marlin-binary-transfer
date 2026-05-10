@@ -1,0 +1,35 @@
+[package]
+name = "marlin-binary-transfer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Host-side implementation of Marlin's Binary File Transfer Mark II protocol for SD-card upload to 3D printers."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/J040M/marlin-binary-transfer"
+documentation = "https://docs.rs/marlin-binary-transfer"
+readme = "README.md"
+keywords = ["marlin", "3d-printing", "serial", "protocol", "gcode"]
+categories = ["network-programming", "embedded", "hardware-support"]
+
+[features]
+default = ["std"]
+std = []
+heatshrink = ["dep:embedded-heatshrink"]
+tokio = ["dep:tokio", "dep:tokio-serial", "std"]
+blocking = ["std"]
+serial = ["dep:serialport", "blocking"]
+
+[dependencies]
+embedded-heatshrink = { version = "0.1", optional = true }
+serialport = { version = "4", optional = true }
+tokio = { version = "1", features = ["io-util", "macros"], optional = true }
+tokio-serial = { version = "5", optional = true }
+thiserror = "2"
+
+[dev-dependencies]
+criterion = "0.8"
+proptest = "1"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
