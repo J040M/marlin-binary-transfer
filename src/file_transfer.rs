@@ -255,13 +255,16 @@ impl<'a> FileTransfer<'a> {
     ///
     /// # Panics
     ///
-    /// Panics unless the file is open (state `Opened` or
-    /// `AwaitingWriteAck`). Back-to-back writes without pumping between
-    /// them are allowed — the session queues them.
+    /// Panics unless the file is open and no WRITE is in flight (state
+    /// `Opened`). Callers must pump until [`FileEvent::WriteAcked`]
+    /// before issuing the next [`write`](Self::write). This mirrors
+    /// the Python reference's one-packet-in-flight policy and keeps
+    /// the state machine unambiguous — pipelining is out of scope for
+    /// 0.1.
     pub fn write(&mut self, chunk: &[u8], now: Instant) {
         assert!(
-            matches!(self.state, State::Opened | State::AwaitingWriteAck),
-            "write() requires Opened state, found {:?}",
+            matches!(self.state, State::Opened),
+            "write() requires Opened state (pump until WriteAcked between writes), found {:?}",
             self.state
         );
         self.state = State::AwaitingWriteAck;
@@ -272,11 +275,11 @@ impl<'a> FileTransfer<'a> {
     ///
     /// # Panics
     ///
-    /// Panics unless the file is open (state `Opened` or
-    /// `AwaitingWriteAck`).
+    /// Panics unless the file is open and no WRITE is in flight
+    /// (state `Opened`).
     pub fn close(&mut self, now: Instant) {
         assert!(
-            matches!(self.state, State::Opened | State::AwaitingWriteAck),
+            matches!(self.state, State::Opened),
             "close() requires Opened state, found {:?}",
             self.state
         );
@@ -288,12 +291,12 @@ impl<'a> FileTransfer<'a> {
     ///
     /// # Panics
     ///
-    /// Panics unless the file is open (state `Opened` or
-    /// `AwaitingWriteAck`). Aborting before OPEN completes makes no
+    /// Panics unless the file is open and no WRITE is in flight
+    /// (state `Opened`). Aborting before OPEN completes makes no
     /// protocol sense — there's nothing for the device to abort.
     pub fn abort(&mut self, now: Instant) {
         assert!(
-            matches!(self.state, State::Opened | State::AwaitingWriteAck),
+            matches!(self.state, State::Opened),
             "abort() requires Opened state, found {:?}",
             self.state
         );
@@ -424,6 +427,12 @@ impl<'a> FileTransfer<'a> {
             (State::AwaitingQueryReply, Some(PendingAscii::QueryFailed(err))) => {
                 self.fail(err);
             }
+            (State::AwaitingQueryReply, None) => {
+                self.fail(FileError::ProtocolViolation {
+                    state: "AwaitingQueryReply",
+                    expected: "PFT:version:<v>:<compression-spec>",
+                });
+            }
             (State::AwaitingOpenReply, Some(PendingAscii::OpenSuccess)) => {
                 self.state = State::Opened;
                 self.out_events.push_back(FileEvent::Opened);
@@ -438,7 +447,13 @@ impl<'a> FileTransfer<'a> {
                 self.out_events
                     .push_back(FileEvent::Failed(FileError::OpenFail));
             }
-            (State::AwaitingWriteAck, _) => {
+            (State::AwaitingOpenReply, None) => {
+                self.fail(FileError::ProtocolViolation {
+                    state: "AwaitingOpenReply",
+                    expected: "PFT:success | PFT:busy | PFT:fail",
+                });
+            }
+            (State::AwaitingWriteAck, None) => {
                 self.state = State::Opened;
                 self.out_events.push_back(FileEvent::WriteAcked);
             }

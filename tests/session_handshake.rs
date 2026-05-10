@@ -177,6 +177,30 @@ fn tick_emits_timeout_after_total_budget() {
 }
 
 #[test]
+#[should_panic(expected = "Session::send called before SYNC handshake completed")]
+fn send_before_handshake_panics() {
+    let mut s = Session::new();
+    s.send(1, 0, &[], Instant::now()); // panic: is_synced still false
+}
+
+#[test]
+#[should_panic(expected = "Session::send called before SYNC handshake completed")]
+fn send_after_reset_without_reconnect_panics() {
+    let mut s = Session::new();
+    let now = Instant::now();
+    s.connect(now);
+    let _ = s.poll_outbound();
+    s.feed(b"ss0,512,1.0\n", now);
+    let _ = s.poll_event();
+    assert!(s.is_synced());
+
+    s.reset();
+    // After reset, is_synced is false again — send without re-connecting
+    // would dispatch a packet with sync=0 that the device wouldn't ack.
+    s.send(1, 0, &[], now); // panic
+}
+
+#[test]
 fn reset_clears_state_so_new_connect_works() {
     let mut s = Session::new();
     let now = Instant::now();

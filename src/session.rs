@@ -239,11 +239,23 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// Panics if `protocol > 15`, `packet_type > 15`, or the payload is
-    /// longer than [`codec::MAX_PAYLOAD`]. These are programmer errors;
-    /// production callers should clamp payload size to
+    /// Panics if:
+    /// - the session has not yet observed an `ss` handshake reply
+    ///   (`is_synced() == false`) — without a device-confirmed sync
+    ///   counter, the packet would go out with `sync=0` and almost
+    ///   certainly desynchronise the protocol;
+    /// - `protocol > 15`, `packet_type > 15`, or the payload is longer
+    ///   than [`codec::MAX_PAYLOAD`].
+    ///
+    /// All of the above are programmer errors; production callers should
+    /// drive [`connect`](Self::connect) to completion, observe
+    /// [`Event::Synced`], and clamp payload size to
     /// [`max_block_size`](Self::max_block_size).
     pub fn send(&mut self, protocol: u8, packet_type: u8, payload: &[u8], now: Instant) {
+        assert!(
+            self.is_synced,
+            "Session::send called before SYNC handshake completed; call connect() and drive feed() until Event::Synced first"
+        );
         assert!(protocol <= 0xF, "protocol id out of range");
         assert!(packet_type <= 0xF, "packet type out of range");
         assert!(

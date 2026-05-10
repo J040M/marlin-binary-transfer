@@ -288,6 +288,55 @@ fn explicit_heatshrink_against_heatshrink_device_uses_caller_params() {
 }
 
 #[test]
+fn query_without_pft_version_emits_protocol_violation() {
+    // Drive handshake, send QUERY, then feed a bare ok<n> without the
+    // expected PFT:version: preamble.
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let query_bytes = ft.poll_outbound().expect("QUERY bytes pending");
+    let sync = query_bytes[2];
+    ft.feed(format!("ok{sync}\n").as_bytes(), now);
+
+    let evt = ft.poll().expect("Failed event");
+    match evt {
+        FileEvent::Failed(FileError::ProtocolViolation { state, .. }) => {
+            assert_eq!(state, "AwaitingQueryReply");
+        }
+        other => panic!("expected ProtocolViolation, got {other:?}"),
+    }
+}
+
+#[test]
+fn open_without_pft_reply_emits_protocol_violation() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+
+    ft.open("a.gco", false, now);
+    let open_bytes = ft.poll_outbound().expect("OPEN bytes pending");
+    let sync = open_bytes[2];
+    ft.feed(format!("ok{sync}\n").as_bytes(), now);
+
+    let evt = ft.poll().expect("Failed event");
+    match evt {
+        FileEvent::Failed(FileError::ProtocolViolation { state, .. }) => {
+            assert_eq!(state, "AwaitingOpenReply");
+        }
+        other => panic!("expected ProtocolViolation, got {other:?}"),
+    }
+}
+
+#[test]
 fn close_without_pft_preamble_emits_protocol_violation() {
     let mut session = Session::new();
     let mut device = FakeDevice::new(512, "1.0", 0).with_behaviour(DeviceBehaviour {
@@ -455,7 +504,11 @@ fn abort_before_open_panics() {
 }
 
 #[test]
-fn back_to_back_writes_without_pump_are_allowed() {
+#[should_panic(expected = "write() requires Opened state")]
+fn back_to_back_writes_without_pump_panics() {
+    // The state machine intentionally keeps one packet in flight at a
+    // time (mirrors the Python reference). Issuing a second write
+    // without first pumping until WriteAcked is a programmer error.
     let mut session = Session::new();
     let mut device = FakeDevice::new(512, "1.0", 0);
     complete_handshake(&mut session, &mut device);
@@ -467,17 +520,8 @@ fn back_to_back_writes_without_pump_are_allowed() {
     ft.open("a.gco", false, now);
     let _ = pump_until_event(&mut ft, &mut device, 10);
 
-    // Two writes back-to-back without pumping. After the first write,
-    // state is AwaitingWriteAck — second write must not panic.
-    ft.write(b"first", now);
-    ft.write(b"second", now);
-
-    // Drain everything and verify both chunks made it through.
-    for _ in 0..30 {
-        pump_ft(&mut ft, &mut device);
-        let _ = ft.poll();
-    }
-    assert_eq!(device.written_bytes, b"firstsecond");
+    ft.write(b"first", now); // OK
+    ft.write(b"second", now); // panic: state is AwaitingWriteAck
 }
 
 #[test]
