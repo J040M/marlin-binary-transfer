@@ -59,7 +59,9 @@ pub enum Event {
     /// A `fe` line was received: device reports a fatal protocol error.
     FatalError,
     /// The session received an `ok<m>` whose number did not match the
-    /// in-flight packet's sync. Recovery requires a fresh `connect`.
+    /// in-flight packet's sync. Recovery requires calling
+    /// [`Session::reset`] then [`Session::connect`] — the protocol
+    /// has no way to resynchronise mid-stream.
     OutOfSync {
         /// Sync number we expected an ack for.
         expected: u8,
@@ -198,6 +200,29 @@ impl Session {
         self.in_flight.is_some()
     }
 
+    /// Reset the session to its construction baseline.
+    ///
+    /// Drops any in-flight packet, queued packets, pending outbound
+    /// bytes, pending events, and inbound buffer; clears the sync
+    /// counter, sync state, and device-advertised values. Timeouts
+    /// (`response_timeout` / `total_timeout`) are preserved.
+    ///
+    /// Use this after observing [`Event::OutOfSync`] before calling
+    /// [`connect`](Self::connect) again: the BFT protocol has no
+    /// way to resynchronise mid-stream, so the only recovery path is
+    /// to clear local state and redo the handshake from scratch.
+    pub fn reset(&mut self) {
+        self.sync = 0;
+        self.is_synced = false;
+        self.max_block_size = None;
+        self.protocol_version = None;
+        self.in_flight = None;
+        self.queued.clear();
+        self.outbound.clear();
+        self.events.clear();
+        self.inbound_buf.clear();
+    }
+
     /// Queue the SYNC control packet (protocol=0, packet_type=1).
     /// The caller should already have written the ASCII trigger
     /// `b"M28B1\n"` before calling this.
@@ -267,7 +292,11 @@ impl Session {
     /// Push received bytes from the wire. Bytes are accumulated until a
     /// newline-terminated ASCII line is recognised, at which point an
     /// [`Event`] is queued for [`poll_event`](Self::poll_event).
-    pub fn feed(&mut self, bytes: &[u8]) {
+    ///
+    /// `now` is used to timestamp any queued packet that gets dispatched
+    /// as a side effect of an inbound ack — fully sans-I/O, no internal
+    /// wall-clock reads.
+    pub fn feed(&mut self, bytes: &[u8], now: Instant) {
         self.inbound_buf.extend_from_slice(bytes);
         while let Some(pos) = self.inbound_buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.inbound_buf.drain(..=pos).collect();
@@ -276,14 +305,14 @@ impl Session {
             if trimmed.is_empty() {
                 continue;
             }
-            self.process_line(trimmed);
+            self.process_line(trimmed, now);
         }
     }
 
-    fn process_line(&mut self, line: &[u8]) {
+    fn process_line(&mut self, line: &[u8], now: Instant) {
         if let Some(rest) = strip_prefix(line, b"ok") {
             if let Some(n) = parse_decimal_u8(rest) {
-                self.handle_ok(n);
+                self.handle_ok(n, now);
                 return;
             }
         }
@@ -294,7 +323,7 @@ impl Session {
             }
         }
         if let Some(rest) = strip_prefix(line, b"ss") {
-            self.handle_ss(rest);
+            self.handle_ss(rest, now);
             return;
         }
         if line == b"fe" {
@@ -311,7 +340,7 @@ impl Session {
         }
     }
 
-    fn handle_ok(&mut self, n: u8) {
+    fn handle_ok(&mut self, n: u8, now: Instant) {
         let Some(flight) = self.in_flight.as_ref() else {
             // No outstanding packet — stray ack. Surface as a passthrough so
             // callers can debug, but don't crash.
@@ -337,16 +366,10 @@ impl Session {
         self.in_flight = None;
         self.sync = ((self.sync as u16 + 1) % SYNC_MOD) as u8;
         self.events.push_back(Event::Ack(n));
-        // Stage the next queued packet, if any.
-        // We need a "now" to record send timestamps; reuse last_sent
-        // semantics by passing the most recent time we know — but we
-        // don't have one here. Use the last_sent of the just-completed
-        // packet as a stand-in. Tick() will correct on next call.
-        // Simpler: dispatch on next tick(). Mark queued for advance.
-        self.try_advance();
+        self.dispatch_if_idle(now);
     }
 
-    fn handle_ss(&mut self, rest: &[u8]) {
+    fn handle_ss(&mut self, rest: &[u8], now: Instant) {
         let s = match std::str::from_utf8(rest) {
             Ok(s) => s,
             Err(_) => return,
@@ -379,33 +402,7 @@ impl Session {
             max_block_size,
             protocol_version,
         });
-        self.try_advance();
-    }
-
-    fn try_advance(&mut self) {
-        // Dispatch the next queued packet without a real `now`. The caller's
-        // next tick() will set proper timestamps if a retransmit is needed;
-        // for the immediate transmit we tag with the only Instant we can —
-        // the in-flight packet's last_sent. If there's no in-flight, use
-        // Instant::now(). This is the only place we touch Instant::now()
-        // outside of caller-driven entry points; it ensures retransmit
-        // timing is bounded but conservative.
-        if self.in_flight.is_some() {
-            return;
-        }
-        let Some(next) = self.queued.pop_front() else {
-            return;
-        };
-        let bytes = next.bytes_without_sync.build(self.sync);
-        let now = Instant::now();
-        self.outbound.push_back(bytes.clone());
-        self.in_flight = Some(InFlight {
-            sync: self.sync,
-            bytes,
-            first_sent: now,
-            last_sent: now,
-            is_sync_handshake: next.is_sync_handshake,
-        });
+        self.dispatch_if_idle(now);
     }
 
     /// Drain the next queued event. Returns `None` when the queue is empty.

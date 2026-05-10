@@ -40,6 +40,10 @@ pub struct DeviceBehaviour {
     pub busy_on_next_open: bool,
     /// If set, the device will reply `PFT:fail` to the next OPEN.
     pub fail_on_next_open: bool,
+    /// If set, CLOSE / ABORT replies omit the `PFT:success` preamble —
+    /// the device just sends the bare `ok<n>` ack. Used to exercise
+    /// the host's protocol-violation detection.
+    pub skip_pft_on_terminal: bool,
 }
 
 /// In-process fake of a Marlin printer speaking BFT.
@@ -190,7 +194,9 @@ impl FakeDevice {
             (1, 2) => {
                 // File CLOSE.
                 self.closed = true;
-                self.write_line("PFT:success");
+                if !self.behaviour.skip_pft_on_terminal {
+                    self.write_line("PFT:success");
+                }
                 self.write_line(&format!("ok{}", pkt.sync));
             }
             (1, 3) => {
@@ -201,7 +207,9 @@ impl FakeDevice {
             (1, 4) => {
                 // ABORT.
                 self.aborted = true;
-                self.write_line("PFT:success");
+                if !self.behaviour.skip_pft_on_terminal {
+                    self.write_line("PFT:success");
+                }
                 self.write_line(&format!("ok{}", pkt.sync));
             }
             _ => {

@@ -9,6 +9,32 @@ use thiserror::Error;
 
 use crate::file_transfer::{Compression, FileError};
 
+/// Conservative fallback when the device-advertised block size is zero
+/// (which shouldn't happen after a successful SYNC handshake but we
+/// handle it defensively).
+const FALLBACK_CHUNK_SIZE: usize = 256;
+
+/// Resolve the per-WRITE chunk size from caller options and the device
+/// max.
+///
+/// - `requested == 0` means "use the device-advertised max verbatim".
+/// - `requested > 0` is honored, but capped to the device max so a
+///   caller asking for 4096 against a device that says 512 doesn't
+///   blow past what the device can buffer.
+/// - `device_max == 0` falls back to [`FALLBACK_CHUNK_SIZE`].
+pub(crate) fn resolve_chunk_size(requested: usize, device_max: u16) -> usize {
+    let device_max = if device_max == 0 {
+        FALLBACK_CHUNK_SIZE
+    } else {
+        device_max as usize
+    };
+    if requested == 0 {
+        device_max
+    } else {
+        requested.min(device_max)
+    }
+}
+
 /// Caller-supplied options controlling the upload.
 #[derive(Debug, Clone)]
 pub struct UploadOptions {
@@ -75,4 +101,39 @@ pub enum UploadError {
     #[cfg(feature = "heatshrink")]
     #[error("heatshrink error: {0}")]
     Heatshrink(#[from] crate::compression::HeatshrinkError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_zero_uses_device_max() {
+        assert_eq!(resolve_chunk_size(0, 512), 512);
+    }
+
+    #[test]
+    fn requested_under_max_is_honored() {
+        assert_eq!(resolve_chunk_size(128, 512), 128);
+    }
+
+    #[test]
+    fn requested_over_max_is_capped() {
+        assert_eq!(resolve_chunk_size(4096, 512), 512);
+    }
+
+    #[test]
+    fn requested_zero_with_zero_device_max_falls_back() {
+        assert_eq!(resolve_chunk_size(0, 0), FALLBACK_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn requested_nonzero_with_zero_device_max_capped_to_fallback() {
+        assert_eq!(resolve_chunk_size(1024, 0), FALLBACK_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn requested_equal_to_max_is_honored() {
+        assert_eq!(resolve_chunk_size(512, 512), 512);
+    }
 }

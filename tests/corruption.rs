@@ -22,7 +22,7 @@ fn pump(session: &mut Session, device: &mut FakeDevice) {
     }
     let reply = device.drain_reply();
     if !reply.is_empty() {
-        session.feed(&reply);
+        session.feed(&reply, Instant::now());
     }
 }
 
@@ -128,11 +128,11 @@ fn corrupt_ack_token_does_not_panic_and_is_ignored() {
     let mut session = Session::new();
     session.connect(Instant::now());
     let _ = session.poll_outbound();
-    session.feed(b"ss0,512,1.0\n");
+    session.feed(b"ss0,512,1.0\n", Instant::now());
     let _ = session.poll_event();
 
     // Garbage that doesn't match any known token.
-    session.feed(b"not-a-real-token-line\n");
+    session.feed(b"not-a-real-token-line\n", Instant::now());
     while let Some(evt) = session.poll_event() {
         // Should surface as AsciiLine; nothing should panic.
         match evt {

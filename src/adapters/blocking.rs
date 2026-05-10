@@ -25,6 +25,7 @@
 use std::io::{Read, Write};
 use std::time::Instant;
 
+use crate::adapters::common::resolve_chunk_size;
 use crate::file_transfer::{Compression, FileEvent, FileTransfer};
 use crate::session::Session;
 
@@ -47,6 +48,10 @@ pub fn upload<T: Read + Write + ?Sized, S: Read>(
 
     drive_session_until_synced(transport, &mut session)?;
 
+    // Capture the device-advertised block size before the FileTransfer
+    // borrow takes the session mutably.
+    let device_max = session.max_block_size().unwrap_or(0);
+
     let mut ft = FileTransfer::new(&mut session);
     ft.query(options.compression.clone(), Instant::now());
     let negotiated = drive_until_negotiated(transport, &mut ft)?;
@@ -59,12 +64,7 @@ pub fn upload<T: Read + Write + ?Sized, S: Read>(
         ..UploadStats::default()
     };
 
-    let mut chunk_size = if options.chunk_size > 0 {
-        options.chunk_size
-    } else {
-        // Default to device-advertised size, falling back to a conservative 256.
-        256
-    };
+    let chunk_size = resolve_chunk_size(options.chunk_size, device_max);
     // Read whole source into memory once, then either compress or chunk
     // through it. Mirrors the Python ref's behaviour and keeps the chunk
     // boundary deterministic.
@@ -87,10 +87,6 @@ pub fn upload<T: Read + Write + ?Sized, S: Read>(
         }
         Compression::Auto => unreachable!("FileTransfer resolves Auto during query"),
     };
-
-    if chunk_size == 0 {
-        chunk_size = 256;
-    }
 
     for chunk in payload.chunks(chunk_size) {
         ft.write(chunk, Instant::now());
@@ -121,7 +117,7 @@ fn drive_session_until_synced<T: Read + Write + ?Sized>(
             Err(e) => return Err(UploadError::Io(e)),
         };
         if n > 0 {
-            session.feed(&buf[..n]);
+            session.feed(&buf[..n], Instant::now());
         }
         while let Some(evt) = session.poll_event() {
             if matches!(evt, Event::Synced { .. }) {
@@ -148,7 +144,7 @@ fn drive_until_negotiated<T: Read + Write + ?Sized>(
             Err(e) => return Err(UploadError::Io(e)),
         };
         if n > 0 {
-            ft.feed(&buf[..n]);
+            ft.feed(&buf[..n], Instant::now());
         }
         while let Some(evt) = ft.poll() {
             match evt {
@@ -178,7 +174,7 @@ fn drive_until_event<T: Read + Write + ?Sized, F: Fn(&FileEvent) -> bool>(
             Err(e) => return Err(UploadError::Io(e)),
         };
         if n > 0 {
-            ft.feed(&buf[..n]);
+            ft.feed(&buf[..n], Instant::now());
         }
         while let Some(evt) = ft.poll() {
             if let FileEvent::Failed(err) = &evt {

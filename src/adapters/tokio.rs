@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::adapters::common::resolve_chunk_size;
 use crate::file_transfer::{Compression, FileEvent, FileTransfer};
 use crate::session::Session;
 
@@ -31,6 +32,10 @@ where
     let mut session = Session::new();
     session.connect(Instant::now());
     drive_until_synced(transport, &mut session).await?;
+
+    // Capture the device-advertised block size before FileTransfer takes
+    // the session mutably.
+    let device_max = session.max_block_size().unwrap_or(0);
 
     let mut ft = FileTransfer::new(&mut session);
     ft.query(options.compression.clone(), Instant::now());
@@ -64,11 +69,7 @@ where
         Compression::Auto => unreachable!("FileTransfer resolves Auto during query"),
     };
 
-    let chunk_size = if options.chunk_size > 0 {
-        options.chunk_size
-    } else {
-        256
-    };
+    let chunk_size = resolve_chunk_size(options.chunk_size, device_max);
 
     for chunk in payload.chunks(chunk_size) {
         ft.write(chunk, Instant::now());
@@ -95,7 +96,7 @@ where
         }
         let n = transport.read(&mut buf).await?;
         if n > 0 {
-            session.feed(&buf[..n]);
+            session.feed(&buf[..n], Instant::now());
         }
         while let Some(evt) = session.poll_event() {
             if matches!(evt, Event::Synced { .. }) {
@@ -121,7 +122,7 @@ where
         }
         let n = transport.read(&mut buf).await?;
         if n > 0 {
-            ft.feed(&buf[..n]);
+            ft.feed(&buf[..n], Instant::now());
         }
         while let Some(evt) = ft.poll() {
             match evt {
@@ -151,7 +152,7 @@ where
         }
         let n = transport.read(&mut buf).await?;
         if n > 0 {
-            ft.feed(&buf[..n]);
+            ft.feed(&buf[..n], Instant::now());
         }
         while let Some(evt) = ft.poll() {
             if let FileEvent::Failed(err) = &evt {

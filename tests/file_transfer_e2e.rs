@@ -24,7 +24,7 @@ fn pump(session: &mut Session, device: &mut FakeDevice) {
     }
     let reply = device.drain_reply();
     if !reply.is_empty() {
-        session.feed(&reply);
+        session.feed(&reply, Instant::now());
     }
 }
 
@@ -68,7 +68,7 @@ fn pump_ft(ft: &mut FileTransfer<'_>, device: &mut FakeDevice) {
     }
     let reply = device.drain_reply();
     if !reply.is_empty() {
-        ft.feed(&reply);
+        ft.feed(&reply, Instant::now());
     }
 }
 
@@ -229,6 +229,255 @@ fn abort_after_open_emits_abort_acked() {
         Some(FileEvent::AbortAcked)
     );
     assert!(device.aborted);
+}
+
+#[test]
+fn explicit_heatshrink_against_none_device_fails_with_compression_unsupported() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0).with_compression(CompressionSpec::None);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    ft.query(
+        Compression::Heatshrink {
+            window: 8,
+            lookahead: 4,
+        },
+        Instant::now(),
+    );
+    let evt = pump_until_event(&mut ft, &mut device, 10).expect("Failed event");
+    assert_eq!(evt, FileEvent::Failed(FileError::CompressionUnsupported));
+    assert!(
+        ft.negotiated_compression().is_none(),
+        "no compression should be negotiated when QUERY fails"
+    );
+}
+
+#[test]
+fn explicit_heatshrink_against_heatshrink_device_uses_caller_params() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0).with_compression(CompressionSpec::Heatshrink {
+        window: 10,
+        lookahead: 5,
+    });
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    ft.query(
+        Compression::Heatshrink {
+            window: 8,
+            lookahead: 4,
+        },
+        Instant::now(),
+    );
+    let evt = pump_until_event(&mut ft, &mut device, 10).expect("Negotiated event");
+    match evt {
+        FileEvent::Negotiated { compression, .. } => {
+            // Caller's params override the device-advertised ones — matching
+            // window/lookahead is documented as the caller's responsibility.
+            assert_eq!(
+                compression,
+                Compression::Heatshrink {
+                    window: 8,
+                    lookahead: 4
+                }
+            );
+        }
+        other => panic!("expected Negotiated, got {other:?}"),
+    }
+}
+
+#[test]
+fn close_without_pft_preamble_emits_protocol_violation() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0).with_behaviour(DeviceBehaviour {
+        skip_pft_on_terminal: true,
+        ..DeviceBehaviour::default()
+    });
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.open("a.gco", false, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.close(now);
+    let evt = pump_until_event(&mut ft, &mut device, 10).expect("Failed event");
+    match evt {
+        FileEvent::Failed(FileError::ProtocolViolation { state, .. }) => {
+            assert_eq!(state, "AwaitingCloseReply");
+        }
+        other => panic!("expected ProtocolViolation, got {other:?}"),
+    }
+}
+
+#[test]
+fn abort_without_pft_preamble_emits_protocol_violation() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0).with_behaviour(DeviceBehaviour {
+        skip_pft_on_terminal: true,
+        ..DeviceBehaviour::default()
+    });
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.open("doomed.gco", false, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.abort(now);
+    let evt = pump_until_event(&mut ft, &mut device, 10).expect("Failed event");
+    match evt {
+        FileEvent::Failed(FileError::ProtocolViolation { state, .. }) => {
+            assert_eq!(state, "AwaitingAbortReply");
+        }
+        other => panic!("expected ProtocolViolation, got {other:?}"),
+    }
+}
+
+#[test]
+fn close_ioerror_surfaces_as_io_error() {
+    // Drive a normal handshake/query/open via FakeDevice, then synthesize
+    // the ioerror reply by manually feeding it (FakeDevice always replies
+    // success). This covers the previously-untested CloseIoError path.
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.open("a.gco", false, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+
+    // Send CLOSE, capture its bytes (don't pump them through the device),
+    // then feed back our own ioerror reply.
+    ft.close(now);
+    let close_bytes = ft.poll_outbound().expect("CLOSE bytes pending");
+    let sync = close_bytes[2];
+    ft.feed(b"PFT:ioerror\n", now);
+    ft.feed(format!("ok{sync}\n").as_bytes(), now);
+
+    let evt = ft.poll().expect("Failed event");
+    assert_eq!(evt, FileEvent::Failed(FileError::IoError));
+}
+
+#[test]
+fn close_invalid_surfaces_as_no_open_file() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.open("a.gco", false, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+
+    ft.close(now);
+    let close_bytes = ft.poll_outbound().expect("CLOSE bytes pending");
+    let sync = close_bytes[2];
+    ft.feed(b"PFT:invalid\n", now);
+    ft.feed(format!("ok{sync}\n").as_bytes(), now);
+
+    let evt = ft.poll().expect("Failed event");
+    assert_eq!(evt, FileEvent::Failed(FileError::NoOpenFile));
+}
+
+#[test]
+#[should_panic(expected = "query() requires Idle state")]
+fn query_after_query_panics() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    ft.query(Compression::None, now); // panic: state is AwaitingQueryReply
+}
+
+#[test]
+#[should_panic(expected = "open() requires Negotiated state")]
+fn open_before_query_panics() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    ft.open("a.gco", false, Instant::now()); // panic: state is Idle
+}
+
+#[test]
+#[should_panic(expected = "write() requires Opened state")]
+fn write_before_open_panics() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.write(b"data", now); // panic: state is Negotiated
+}
+
+#[test]
+#[should_panic(expected = "close() requires Opened state")]
+fn close_before_open_panics() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.close(now); // panic: state is Negotiated
+}
+
+#[test]
+#[should_panic(expected = "abort() requires Opened state")]
+fn abort_before_open_panics() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.abort(now); // panic: state is Negotiated
+}
+
+#[test]
+fn back_to_back_writes_without_pump_are_allowed() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.open("a.gco", false, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+
+    // Two writes back-to-back without pumping. After the first write,
+    // state is AwaitingWriteAck — second write must not panic.
+    ft.write(b"first", now);
+    ft.write(b"second", now);
+
+    // Drain everything and verify both chunks made it through.
+    for _ in 0..30 {
+        pump_ft(&mut ft, &mut device);
+        let _ = ft.poll();
+    }
+    assert_eq!(device.written_bytes, b"firstsecond");
 }
 
 #[test]

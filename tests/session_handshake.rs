@@ -32,7 +32,7 @@ fn ss_reply_completes_handshake() {
     s.connect(Instant::now());
     let _ = s.poll_outbound();
 
-    s.feed(b"ss5,512,1.0\n");
+    s.feed(b"ss5,512,1.0\n", Instant::now());
     match s.poll_event().unwrap() {
         Event::Synced {
             max_block_size,
@@ -55,13 +55,13 @@ fn ok_acks_advance_sync_counter() {
     let mut s = Session::new();
     s.connect(Instant::now());
     let _ = s.poll_outbound();
-    s.feed(b"ss0,512,1.0\n");
+    s.feed(b"ss0,512,1.0\n", Instant::now());
     let _ = s.poll_event();
 
     s.send(1, 0, &[], Instant::now());
     let bytes = s.poll_outbound().unwrap();
     assert_eq!(bytes[2], 0, "first packet should use sync 0");
-    s.feed(b"ok0\n");
+    s.feed(b"ok0\n", Instant::now());
     assert!(matches!(s.poll_event().unwrap(), Event::Ack(0)));
     assert_eq!(s.current_sync(), 1);
 }
@@ -71,12 +71,12 @@ fn out_of_sync_ack_is_surfaced() {
     let mut s = Session::new();
     s.connect(Instant::now());
     let _ = s.poll_outbound();
-    s.feed(b"ss0,512,1.0\n");
+    s.feed(b"ss0,512,1.0\n", Instant::now());
     let _ = s.poll_event();
 
     s.send(1, 0, &[], Instant::now());
     let _ = s.poll_outbound();
-    s.feed(b"ok99\n");
+    s.feed(b"ok99\n", Instant::now());
     match s.poll_event().unwrap() {
         Event::OutOfSync { expected, got } => {
             assert_eq!(expected, 0);
@@ -89,21 +89,21 @@ fn out_of_sync_ack_is_surfaced() {
 #[test]
 fn rs_request_is_surfaced() {
     let mut s = Session::new();
-    s.feed(b"rs7\n");
+    s.feed(b"rs7\n", Instant::now());
     assert!(matches!(s.poll_event().unwrap(), Event::ResendRequested(7)));
 }
 
 #[test]
 fn fe_emits_fatal_error() {
     let mut s = Session::new();
-    s.feed(b"fe\n");
+    s.feed(b"fe\n", Instant::now());
     assert_eq!(s.poll_event(), Some(Event::FatalError));
 }
 
 #[test]
 fn unknown_lines_pass_through_as_ascii() {
     let mut s = Session::new();
-    s.feed(b"PFT:success\n");
+    s.feed(b"PFT:success\n", Instant::now());
     match s.poll_event().unwrap() {
         Event::AsciiLine(line) => assert_eq!(line, "PFT:success"),
         other => panic!("got {other:?}"),
@@ -113,17 +113,17 @@ fn unknown_lines_pass_through_as_ascii() {
 #[test]
 fn feed_handles_partial_lines() {
     let mut s = Session::new();
-    s.feed(b"f");
-    s.feed(b"e");
+    s.feed(b"f", Instant::now());
+    s.feed(b"e", Instant::now());
     assert!(s.poll_event().is_none());
-    s.feed(b"\n");
+    s.feed(b"\n", Instant::now());
     assert_eq!(s.poll_event(), Some(Event::FatalError));
 }
 
 #[test]
 fn feed_handles_crlf() {
     let mut s = Session::new();
-    s.feed(b"fe\r\n");
+    s.feed(b"fe\r\n", Instant::now());
     assert_eq!(s.poll_event(), Some(Event::FatalError));
 }
 
@@ -132,7 +132,7 @@ fn second_send_queues_until_first_acked() {
     let mut s = Session::new();
     s.connect(Instant::now());
     let _ = s.poll_outbound();
-    s.feed(b"ss0,512,1.0\n");
+    s.feed(b"ss0,512,1.0\n", Instant::now());
     let _ = s.poll_event();
 
     s.send(1, 0, &[], Instant::now());
@@ -140,7 +140,7 @@ fn second_send_queues_until_first_acked() {
     let first = s.poll_outbound().unwrap();
     assert!(s.poll_outbound().is_none());
 
-    s.feed(b"ok0\n");
+    s.feed(b"ok0\n", Instant::now());
     let _ = s.poll_event();
     let second = s.poll_outbound().unwrap();
     assert_ne!(first, second);
@@ -177,9 +177,64 @@ fn tick_emits_timeout_after_total_budget() {
 }
 
 #[test]
+fn reset_clears_state_so_new_connect_works() {
+    let mut s = Session::new();
+    let now = Instant::now();
+
+    // Drive a normal connect+sync, then a normal send.
+    s.connect(now);
+    let _ = s.poll_outbound();
+    s.feed(b"ss5,512,1.0\n", now);
+    let _ = s.poll_event(); // consume Synced
+    s.send(1, 0, &[], now);
+    let _ = s.poll_outbound();
+
+    // Force an OutOfSync — device acks a number we don't expect.
+    s.feed(b"ok99\n", now);
+    assert!(matches!(s.poll_event().unwrap(), Event::OutOfSync { .. }));
+
+    // After reset, every observable bit of state is back to baseline.
+    s.reset();
+    assert!(!s.is_synced());
+    assert_eq!(s.max_block_size(), None);
+    assert_eq!(s.protocol_version(), None);
+    assert!(!s.has_pending());
+    assert!(s.poll_outbound().is_none());
+    assert!(s.poll_event().is_none());
+    assert_eq!(s.current_sync(), 0);
+
+    // A fresh connect now produces the canonical SYNC bytes again.
+    s.connect(now);
+    let bytes = s.poll_outbound().expect("post-reset SYNC pending");
+    assert_eq!(bytes, SYNC_PACKET);
+}
+
+#[test]
+fn reset_preserves_configured_timeouts() {
+    let response = Duration::from_millis(123);
+    let total = Duration::from_millis(4567);
+    let mut s = Session::new()
+        .with_response_timeout(response)
+        .with_total_timeout(total);
+    let t0 = Instant::now();
+    s.connect(t0);
+    let _ = s.poll_outbound();
+    s.reset();
+
+    // Timeout configuration must survive reset: a connect+tick after
+    // exactly `response` ms must produce a retransmit, just as it would
+    // on a freshly-built session with these timeouts.
+    s.connect(t0);
+    let first = s.poll_outbound().expect("SYNC pending");
+    s.tick(t0 + response + Duration::from_millis(1));
+    let retransmit = s.poll_outbound().expect("retransmit pending");
+    assert_eq!(first, retransmit);
+}
+
+#[test]
 fn ss_with_garbage_does_not_panic() {
     let mut s = Session::new();
-    s.feed(b"ss not a comma list\n");
+    s.feed(b"ss not a comma list\n", Instant::now());
     assert!(s.poll_event().is_none());
 }
 
@@ -211,6 +266,6 @@ fn pump_once(session: &mut Session, device: &mut FakeDevice) {
     }
     let reply = device.drain_reply();
     if !reply.is_empty() {
-        session.feed(&reply);
+        session.feed(&reply, Instant::now());
     }
 }

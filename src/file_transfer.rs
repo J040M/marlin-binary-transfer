@@ -109,6 +109,18 @@ pub enum FileError {
     /// advertises `none`.
     #[error("device does not support heatshrink compression")]
     CompressionUnsupported,
+    /// Device sent the closing `ok<n>` for a CLOSE or ABORT without
+    /// first emitting the expected `PFT:*` preamble. Without that
+    /// preamble, the transfer can't be classified as success or
+    /// failure, so we surface the violation rather than silently
+    /// claiming completion.
+    #[error("device sent bare ok in {state} without expected {expected} preamble")]
+    ProtocolViolation {
+        /// Symbolic name of the FileTransfer state at the time of the ack.
+        state: &'static str,
+        /// The PFT preamble line(s) the protocol requires before the ack.
+        expected: &'static str,
+    },
 }
 
 /// Internal state-machine state.
@@ -150,6 +162,10 @@ enum PendingAscii {
         version: String,
         compression: Compression,
     },
+    /// QUERY reply parsed but compression negotiation failed (e.g. caller
+    /// asked for heatshrink and device advertises only `none`). Surfaces
+    /// as `FileEvent::Failed(_)` once the matching `ok<n>` arrives.
+    QueryFailed(FileError),
     OpenSuccess,
     OpenBusy,
     OpenFail,
@@ -186,7 +202,19 @@ impl<'a> FileTransfer<'a> {
     /// Issue the QUERY control packet. Caller must specify what
     /// compression mode they want — the actual negotiated mode is
     /// reported back via [`FileEvent::Negotiated`].
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the state is `Idle` (i.e. this is a fresh
+    /// transfer). Programmer error; callers must construct a new
+    /// `FileTransfer` for retries after a `Failed` / `Closed` /
+    /// `Aborted` outcome.
     pub fn query(&mut self, compression: Compression, now: Instant) {
+        assert!(
+            matches!(self.state, State::Idle),
+            "query() requires Idle state, found {:?}",
+            self.state
+        );
         self.requested_compression = compression;
         self.state = State::AwaitingQueryReply;
         self.session.send(self.protocol_id, PT_QUERY, &[], now);
@@ -195,7 +223,18 @@ impl<'a> FileTransfer<'a> {
     /// Send the OPEN packet. `name` is the destination filename on the
     /// SD card. `dummy` requests the device pretend to receive a file
     /// without actually writing it (used for protocol smoke tests).
+    ///
+    /// # Panics
+    ///
+    /// Panics unless QUERY has completed (`Negotiated` state). Without
+    /// QUERY, the compression byte in the OPEN payload would be a
+    /// guess.
     pub fn open(&mut self, name: &str, dummy: bool, now: Instant) {
+        assert!(
+            matches!(self.state, State::Negotiated),
+            "open() requires Negotiated state (call query() first), found {:?}",
+            self.state
+        );
         let comp_byte = match self.negotiated {
             Some(Compression::Heatshrink { .. }) => 1u8,
             _ => 0u8,
@@ -213,19 +252,51 @@ impl<'a> FileTransfer<'a> {
     /// responsible for splitting the source data so each chunk fits
     /// inside the device's `max_block_size` (and, if compression is in
     /// use, for compressing each chunk before passing it here).
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the file is open (state `Opened` or
+    /// `AwaitingWriteAck`). Back-to-back writes without pumping between
+    /// them are allowed — the session queues them.
     pub fn write(&mut self, chunk: &[u8], now: Instant) {
+        assert!(
+            matches!(self.state, State::Opened | State::AwaitingWriteAck),
+            "write() requires Opened state, found {:?}",
+            self.state
+        );
         self.state = State::AwaitingWriteAck;
         self.session.send(self.protocol_id, PT_WRITE, chunk, now);
     }
 
     /// Send the CLOSE packet, finalising the transfer.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the file is open (state `Opened` or
+    /// `AwaitingWriteAck`).
     pub fn close(&mut self, now: Instant) {
+        assert!(
+            matches!(self.state, State::Opened | State::AwaitingWriteAck),
+            "close() requires Opened state, found {:?}",
+            self.state
+        );
         self.state = State::AwaitingCloseReply;
         self.session.send(self.protocol_id, PT_CLOSE, &[], now);
     }
 
     /// Send the ABORT packet, cancelling the transfer.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless the file is open (state `Opened` or
+    /// `AwaitingWriteAck`). Aborting before OPEN completes makes no
+    /// protocol sense — there's nothing for the device to abort.
     pub fn abort(&mut self, now: Instant) {
+        assert!(
+            matches!(self.state, State::Opened | State::AwaitingWriteAck),
+            "abort() requires Opened state, found {:?}",
+            self.state
+        );
         self.state = State::AwaitingAbortReply;
         self.session.send(self.protocol_id, PT_ABORT, &[], now);
     }
@@ -242,8 +313,12 @@ impl<'a> FileTransfer<'a> {
     }
 
     /// Push received bytes into the underlying session.
-    pub fn feed(&mut self, bytes: &[u8]) {
-        self.session.feed(bytes);
+    ///
+    /// `now` is forwarded into [`Session::feed`](crate::session::Session::feed)
+    /// so any packet dispatched as a side effect of an inbound ack gets
+    /// a real timestamp.
+    pub fn feed(&mut self, bytes: &[u8], now: Instant) {
+        self.session.feed(bytes, now);
     }
 
     /// Drive retransmit/timeout logic in the underlying session.
@@ -291,10 +366,12 @@ impl<'a> FileTransfer<'a> {
             };
             self.advertised_version = Some(version.to_string());
             let device_compression = parse_compression_spec(comp);
-            let chosen = self.choose_compression(&device_compression);
-            self.pending_ascii = Some(PendingAscii::QueryVersion {
-                version: version.to_string(),
-                compression: chosen,
+            self.pending_ascii = Some(match self.choose_compression(&device_compression) {
+                Ok(chosen) => PendingAscii::QueryVersion {
+                    version: version.to_string(),
+                    compression: chosen,
+                },
+                Err(err) => PendingAscii::QueryFailed(err),
             });
             return;
         }
@@ -344,6 +421,9 @@ impl<'a> FileTransfer<'a> {
                     compression,
                 });
             }
+            (State::AwaitingQueryReply, Some(PendingAscii::QueryFailed(err))) => {
+                self.fail(err);
+            }
             (State::AwaitingOpenReply, Some(PendingAscii::OpenSuccess)) => {
                 self.state = State::Opened;
                 self.out_events.push_back(FileEvent::Opened);
@@ -376,9 +456,21 @@ impl<'a> FileTransfer<'a> {
                 self.out_events
                     .push_back(FileEvent::Failed(FileError::NoOpenFile));
             }
-            (State::AwaitingAbortReply, _) => {
+            (State::AwaitingCloseReply, None) => {
+                self.fail(FileError::ProtocolViolation {
+                    state: "AwaitingCloseReply",
+                    expected: "PFT:success | PFT:ioerror | PFT:invalid",
+                });
+            }
+            (State::AwaitingAbortReply, Some(PendingAscii::AbortSuccess)) => {
                 self.state = State::Aborted;
                 self.out_events.push_back(FileEvent::AbortAcked);
+            }
+            (State::AwaitingAbortReply, None) => {
+                self.fail(FileError::ProtocolViolation {
+                    state: "AwaitingAbortReply",
+                    expected: "PFT:success",
+                });
             }
             _ => {
                 // Ack arrived in a state where we don't have a pending
@@ -388,20 +480,34 @@ impl<'a> FileTransfer<'a> {
         }
     }
 
-    fn choose_compression(&self, device: &Compression) -> Compression {
+    /// Resolve the negotiated compression mode given what the caller
+    /// requested and what the device just advertised.
+    ///
+    /// Returns `Err(CompressionUnsupported)` when the caller explicitly
+    /// asked for heatshrink but the device only advertises `none` —
+    /// proceeding would corrupt the upload on the device side.
+    ///
+    /// Caller-supplied window/lookahead override the device-advertised
+    /// values when both sides speak heatshrink. Per the
+    /// [`Compression::Heatshrink`] doc-comment, matching parameters is
+    /// the caller's responsibility.
+    fn choose_compression(&self, device: &Compression) -> Result<Compression, FileError> {
         match (&self.requested_compression, device) {
-            (Compression::None, _) => Compression::None,
-            (Compression::Heatshrink { window, lookahead }, _) => Compression::Heatshrink {
-                window: *window,
-                lookahead: *lookahead,
-            },
-            (Compression::Auto, Compression::Heatshrink { window, lookahead }) => {
-                Compression::Heatshrink {
+            (Compression::None, _) => Ok(Compression::None),
+            (Compression::Heatshrink { window, lookahead }, Compression::Heatshrink { .. }) => {
+                Ok(Compression::Heatshrink {
                     window: *window,
                     lookahead: *lookahead,
-                }
+                })
             }
-            (Compression::Auto, _) => Compression::None,
+            (Compression::Heatshrink { .. }, _) => Err(FileError::CompressionUnsupported),
+            (Compression::Auto, Compression::Heatshrink { window, lookahead }) => {
+                Ok(Compression::Heatshrink {
+                    window: *window,
+                    lookahead: *lookahead,
+                })
+            }
+            (Compression::Auto, _) => Ok(Compression::None),
         }
     }
 
