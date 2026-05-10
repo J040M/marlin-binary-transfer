@@ -81,7 +81,55 @@ where
     ft.close(Instant::now());
     drive_until(transport, &mut ft, |e| matches!(e, FileEvent::Closed)).await?;
 
+    // Drop FT so we can drive the session directly through the control
+    // CLOSE (proto=0, type=2) that exits binary mode. Without this, the
+    // printer stays in binary mode and ignores subsequent ASCII g-code.
+    drop(ft);
+    session.send(0, 2, &[], Instant::now());
+    drive_session_until_idle(transport, &mut session).await?;
+
     Ok(stats)
+}
+
+async fn drive_session_until_idle<T>(
+    transport: &mut T,
+    session: &mut Session,
+) -> Result<(), UploadError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    use crate::file_transfer::FileError;
+    use crate::session::Event;
+    let mut buf = [0u8; 1024];
+    for _ in 0..200 {
+        while let Some(out) = session.poll_outbound() {
+            transport.write_all(&out).await?;
+        }
+        let n = read_with_timeout(transport, &mut buf, session.response_timeout()).await?;
+        if n > 0 {
+            session.feed(&buf[..n], Instant::now());
+        }
+        while let Some(evt) = session.poll_event() {
+            match evt {
+                Event::Ack(_) => return Ok(()),
+                Event::FatalError => {
+                    return Err(UploadError::Transfer(FileError::SessionFatalError));
+                }
+                Event::Timeout { .. } => {
+                    return Err(UploadError::Transfer(FileError::SessionTimeout));
+                }
+                Event::OutOfSync { expected, got } => {
+                    return Err(UploadError::Transfer(FileError::SessionOutOfSync {
+                        expected,
+                        got,
+                    }));
+                }
+                _ => {}
+            }
+        }
+        session.tick(Instant::now());
+    }
+    Err(UploadError::Stalled("control close not acked"))
 }
 
 async fn drive_until_synced<T>(transport: &mut T, session: &mut Session) -> Result<(), UploadError>
