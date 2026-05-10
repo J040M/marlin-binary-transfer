@@ -33,25 +33,39 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    name: cargo test (${{ matrix.rust }} / ${{ matrix.features }})
+    name: cargo test (${{ matrix.features }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, "1.75"]
         features:
           - "--no-default-features"
           - ""
           - "--features heatshrink"
           - "--features blocking,heatshrink"
+          - "--features tokio"
+          - "--features tokio,heatshrink"
+          - "--features serial"
           - "--all-features"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test ${{ matrix.features }}
+
+  msrv:
+    name: cargo check (MSRV 1.75)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: "1.75.0"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test ${{ matrix.features }}
+      # Lib-only check: dev-deps (criterion) pull in crates that require
+      # edition2024 (Rust 1.85+), so we can't compile the test/bench targets
+      # on MSRV. The library itself stays buildable on 1.75.
+      - run: cargo check --all-features
 
   doc:
     name: cargo doc

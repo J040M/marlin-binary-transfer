@@ -14,9 +14,12 @@ exclude = ["fuzz/"]
 
 [features]
 default = ["std"]
+# Reserved for future no_std + alloc support. Currently a no-op placeholder:
+# the crate uses std unconditionally in 0.1.x. Kept so callers don't have to
+# change their feature lists when no_std lands. See plan stage 0.2.
 std = []
 heatshrink = ["dep:embedded-heatshrink"]
-tokio = ["dep:tokio", "dep:tokio-serial", "std"]
+tokio = ["dep:tokio", "std"]
 blocking = ["std"]
 serial = ["dep:serialport", "blocking"]
 
@@ -24,7 +27,6 @@ serial = ["dep:serialport", "blocking"]
 embedded-heatshrink = { version = "0.1", optional = true, features = ["std"] }
 serialport = { version = "4", optional = true }
 tokio = { version = "1", features = ["io-util", "macros"], optional = true }
-tokio-serial = { version = "5", optional = true }
 thiserror = "2"
 
 [dev-dependencies]

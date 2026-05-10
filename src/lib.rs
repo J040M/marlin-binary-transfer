@@ -4,9 +4,12 @@
 //! `codec`) does no I/O of its own — callers feed bytes in and pull events out.
 //! Optional adapter modules wrap the core for the common cases:
 //!
-//! - `blocking` — synchronous loop over a `Transport`
-//! - `tokio` — async loop over an `AsyncTransport`
-//! - `serial` — default `Transport` backed by the `serialport` crate
+//! - `blocking` — synchronous loop over a `std::io::Read + Write` transport.
+//! - `tokio` — async loop over a `tokio::io::AsyncRead + AsyncWrite + Unpin`
+//!   transport.
+//! - `serial` — convenience helpers for opening a `serialport::SerialPort`,
+//!   which already implements `Read + Write` and so plugs into `blocking`
+//!   directly.
 //!
 //! See the protocol reference: <https://github.com/MarlinFirmware/Marlin/pull/14817>.
 //!
@@ -23,7 +26,6 @@ pub mod codec;
 pub mod compression;
 pub mod file_transfer;
 pub mod session;
-pub mod transport;
 
 #[cfg(any(feature = "blocking", feature = "tokio", feature = "serial"))]
 pub mod adapters;

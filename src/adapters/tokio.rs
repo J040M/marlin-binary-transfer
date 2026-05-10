@@ -11,9 +11,10 @@ use std::time::Instant;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::adapters::blocking::{UploadError, UploadOptions, UploadStats};
 use crate::file_transfer::{Compression, FileEvent, FileTransfer};
 use crate::session::Session;
+
+pub use crate::adapters::common::{UploadError, UploadOptions, UploadStats};
 
 /// Async equivalent of [`adapters::blocking::upload`](crate::adapters::blocking::upload).
 pub async fn upload<T, S>(

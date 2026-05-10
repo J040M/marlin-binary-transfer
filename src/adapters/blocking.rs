@@ -2,99 +2,33 @@
 //! [`Write`] transport.
 //!
 //! ```no_run
-//! use std::time::Duration;
+//! use std::io::{Read, Write};
 //! use marlin_binary_transfer::adapters::blocking::{upload, UploadOptions};
 //! use marlin_binary_transfer::file_transfer::Compression;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut port = serialport::new("/dev/ttyUSB0", 250_000)
-//!     .timeout(Duration::from_millis(100))
-//!     .open()?;
+//! # fn run<T: Read + Write>(mut port: T) -> Result<(), Box<dyn std::error::Error>> {
 //! let opts = UploadOptions {
 //!     dest_filename: "model.gco".into(),
 //!     compression: Compression::Auto,
 //!     ..UploadOptions::default()
 //! };
-//! let stats = upload(&mut *port, std::fs::File::open("model.gco")?, opts)?;
+//! let stats = upload(&mut port, std::fs::File::open("model.gco")?, opts)?;
 //! println!("Uploaded {} bytes in {} chunks", stats.bytes_sent, stats.chunks_sent);
 //! # Ok(()) }
 //! ```
+//!
+//! The example uses any `Read + Write`. With the `serial` feature enabled,
+//! [`serialport::SerialPort`](https://docs.rs/serialport/latest/serialport/trait.SerialPort.html)
+//! satisfies both traits and works directly; see
+//! [`adapters::serialport`](crate::adapters::serialport) for an `open` helper.
 
 use std::io::{Read, Write};
 use std::time::Instant;
 
-use thiserror::Error;
-
-use crate::file_transfer::{Compression, FileError, FileEvent, FileTransfer};
+use crate::file_transfer::{Compression, FileEvent, FileTransfer};
 use crate::session::Session;
 
-/// Caller-supplied options controlling the upload.
-#[derive(Debug, Clone)]
-pub struct UploadOptions {
-    /// Destination filename on the device's SD card. Required.
-    pub dest_filename: String,
-    /// Compression preference. Defaults to [`Compression::None`].
-    pub compression: Compression,
-    /// Set to true to make the device pretend to receive a file without
-    /// actually writing it; useful for protocol smoke tests.
-    pub dummy: bool,
-    /// Bytes per WRITE packet. Capped to the device-advertised maximum
-    /// after the SYNC handshake completes. `0` means "use the device's
-    /// max_block_size verbatim".
-    pub chunk_size: usize,
-}
-
-impl Default for UploadOptions {
-    fn default() -> Self {
-        Self {
-            dest_filename: String::new(),
-            compression: Compression::None,
-            dummy: false,
-            chunk_size: 0,
-        }
-    }
-}
-
-/// Upload statistics returned on success.
-#[derive(Debug, Clone, Default)]
-pub struct UploadStats {
-    /// Bytes read from `src`.
-    pub source_bytes: u64,
-    /// Bytes written across all WRITE packets (post-compression).
-    pub bytes_sent: u64,
-    /// Number of WRITE packets.
-    pub chunks_sent: u64,
-    /// Compression actually used (resolved from `Compression::Auto`).
-    pub compression: Compression,
-}
-
-/// Errors the upload helper can produce.
-#[derive(Debug, Error)]
-pub enum UploadError {
-    /// Wrapping I/O error from the transport.
-    #[error("transport I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    /// Underlying file-transfer state machine reported a failure.
-    #[error("file transfer failed: {0}")]
-    Transfer(#[from] FileError),
-    /// Reached an unrecoverable protocol state (e.g. device returned
-    /// nothing for too long with no progress).
-    #[error("upload stalled: {0}")]
-    Stalled(&'static str),
-    /// The session never completed the SYNC handshake before the helper
-    /// gave up.
-    #[error("SYNC handshake did not complete")]
-    HandshakeFailed,
-    /// Compression was requested but the `heatshrink` feature is not
-    /// enabled at compile time.
-    #[cfg(not(feature = "heatshrink"))]
-    #[error("heatshrink compression requested but the `heatshrink` feature is disabled")]
-    CompressionFeatureDisabled,
-    /// Heatshrink compression error.
-    #[cfg(feature = "heatshrink")]
-    #[error("heatshrink error: {0}")]
-    Heatshrink(#[from] crate::compression::HeatshrinkError),
-}
+pub use crate::adapters::common::{UploadError, UploadOptions, UploadStats};
 
 /// Perform a complete upload: SYNC, QUERY, OPEN, WRITE×N, CLOSE.
 ///
