@@ -329,6 +329,12 @@ impl<'a> FileTransfer<'a> {
         self.session.tick(now);
     }
 
+    /// Per-attempt response timeout of the underlying session — used by
+    /// adapters to bound inbound reads.
+    pub fn response_timeout(&self) -> std::time::Duration {
+        self.session.response_timeout()
+    }
+
     /// Pull the next file-level event, processing whatever session events
     /// have accumulated. Returns `None` when there is nothing pending.
     pub fn poll(&mut self) -> Option<FileEvent> {

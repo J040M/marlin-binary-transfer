@@ -105,6 +105,7 @@ fn drive_session_until_synced<T: Read + Write + ?Sized>(
     transport: &mut T,
     session: &mut Session,
 ) -> Result<(), UploadError> {
+    use crate::file_transfer::FileError;
     use crate::session::Event;
     let mut buf = [0u8; 1024];
     for _ in 0..200 {
@@ -120,8 +121,21 @@ fn drive_session_until_synced<T: Read + Write + ?Sized>(
             session.feed(&buf[..n], Instant::now());
         }
         while let Some(evt) = session.poll_event() {
-            if matches!(evt, Event::Synced { .. }) {
-                return Ok(());
+            match evt {
+                Event::Synced { .. } => return Ok(()),
+                Event::FatalError => {
+                    return Err(UploadError::Transfer(FileError::SessionFatalError));
+                }
+                Event::Timeout { .. } => {
+                    return Err(UploadError::Transfer(FileError::SessionTimeout));
+                }
+                Event::OutOfSync { expected, got } => {
+                    return Err(UploadError::Transfer(FileError::SessionOutOfSync {
+                        expected,
+                        got,
+                    }));
+                }
+                _ => {}
             }
         }
         session.tick(Instant::now());
