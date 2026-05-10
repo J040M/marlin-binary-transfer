@@ -363,6 +363,9 @@ impl<'a> FileTransfer<'a> {
         if let Some(rest) = line.strip_prefix("PFT:version:") {
             // Format: <version>:<compression-spec>
             //   compression-spec is "none" or "heatshrink,<window>,<lookahead>"
+            if !matches!(self.state, State::AwaitingQueryReply) {
+                return;
+            }
             let (version, comp) = match rest.split_once(':') {
                 Some(parts) => parts,
                 None => return,
@@ -388,16 +391,24 @@ impl<'a> FileTransfer<'a> {
                 });
             }
             "PFT:busy" => {
-                self.pending_ascii = Some(PendingAscii::OpenBusy);
+                if matches!(self.state, State::AwaitingOpenReply) {
+                    self.pending_ascii = Some(PendingAscii::OpenBusy);
+                }
             }
             "PFT:fail" => {
-                self.pending_ascii = Some(PendingAscii::OpenFail);
+                if matches!(self.state, State::AwaitingOpenReply) {
+                    self.pending_ascii = Some(PendingAscii::OpenFail);
+                }
             }
             "PFT:ioerror" => {
-                self.pending_ascii = Some(PendingAscii::CloseIoError);
+                if matches!(self.state, State::AwaitingCloseReply) {
+                    self.pending_ascii = Some(PendingAscii::CloseIoError);
+                }
             }
             "PFT:invalid" => {
-                self.pending_ascii = Some(PendingAscii::CloseInvalid);
+                if matches!(self.state, State::AwaitingCloseReply) {
+                    self.pending_ascii = Some(PendingAscii::CloseInvalid);
+                }
             }
             _ => {
                 // Unknown line — ignore. Marlin emits chatter we don't
@@ -456,6 +467,16 @@ impl<'a> FileTransfer<'a> {
             (State::AwaitingWriteAck, None) => {
                 self.state = State::Opened;
                 self.out_events.push_back(FileEvent::WriteAcked);
+            }
+            (State::AwaitingWriteAck, Some(_)) => {
+                // The PFT setters are state-gated, so reaching this arm
+                // means the device sent something we couldn't interpret
+                // (or we have a logic bug). Surface it loudly rather than
+                // silently leaving the FSM in AwaitingWriteAck.
+                self.fail(FileError::ProtocolViolation {
+                    state: "AwaitingWriteAck",
+                    expected: "bare ok<n> (no PFT preamble)",
+                });
             }
             (State::AwaitingCloseReply, Some(PendingAscii::CloseSuccess)) => {
                 self.state = State::Closed;
