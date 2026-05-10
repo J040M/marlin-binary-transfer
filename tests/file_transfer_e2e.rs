@@ -525,6 +525,54 @@ fn back_to_back_writes_without_pump_panics() {
 }
 
 #[test]
+fn stray_pft_during_write_does_not_swallow_ack() {
+    // Regression: a stray PFT line (busy/fail/ioerror/invalid/version)
+    // arriving while we're in AwaitingWriteAck must not corrupt the
+    // pending_ascii slot and silently consume the legitimate ok<n>.
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.open("x.gco", false, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+
+    ft.write(b"chunk", now);
+    let write_bytes = ft.poll_outbound().expect("WRITE bytes");
+    let sync = write_bytes[2];
+
+    // Stray PFT:ioerror before the ack — must be ignored (state-gated).
+    ft.feed(b"PFT:ioerror\n", now);
+    ft.feed(format!("ok{sync}\n").as_bytes(), now);
+
+    assert_eq!(ft.poll(), Some(FileEvent::WriteAcked));
+}
+
+#[test]
+fn stray_pft_busy_during_write_does_not_corrupt_state() {
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+    ft.open("x.gco", false, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10);
+
+    ft.write(b"chunk", now);
+    let write_bytes = ft.poll_outbound().expect("WRITE bytes");
+    let sync = write_bytes[2];
+    ft.feed(b"PFT:busy\n", now);
+    ft.feed(format!("ok{sync}\n").as_bytes(), now);
+    assert_eq!(ft.poll(), Some(FileEvent::WriteAcked));
+}
+
+#[test]
 fn dummy_open_sets_dummy_byte() {
     let mut session = Session::new();
     let mut device = FakeDevice::new(512, "1.0", 0);
