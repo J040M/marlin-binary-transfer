@@ -173,6 +173,18 @@ impl Session {
         self
     }
 
+    /// Current per-attempt response timeout. Adapters wrap their inbound
+    /// reads in this so [`Self::tick`] can fire even when the transport
+    /// stays idle.
+    pub fn response_timeout(&self) -> Duration {
+        self.response_timeout
+    }
+
+    /// Current total per-packet budget across all retransmits.
+    pub fn total_timeout(&self) -> Duration {
+        self.total_timeout
+    }
+
     /// True once an `ss` handshake reply has been received.
     pub fn is_synced(&self) -> bool {
         self.is_synced

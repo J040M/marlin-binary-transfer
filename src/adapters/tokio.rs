@@ -7,7 +7,7 @@
 //! [`AsyncRead`]: tokio::io::AsyncRead
 //! [`AsyncWrite`]: tokio::io::AsyncWrite
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -88,19 +88,33 @@ async fn drive_until_synced<T>(transport: &mut T, session: &mut Session) -> Resu
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    use crate::file_transfer::FileError;
     use crate::session::Event;
     let mut buf = [0u8; 1024];
     for _ in 0..200 {
         while let Some(out) = session.poll_outbound() {
             transport.write_all(&out).await?;
         }
-        let n = transport.read(&mut buf).await?;
+        let n = read_with_timeout(transport, &mut buf, session.response_timeout()).await?;
         if n > 0 {
             session.feed(&buf[..n], Instant::now());
         }
         while let Some(evt) = session.poll_event() {
-            if matches!(evt, Event::Synced { .. }) {
-                return Ok(());
+            match evt {
+                Event::Synced { .. } => return Ok(()),
+                Event::FatalError => {
+                    return Err(UploadError::Transfer(FileError::SessionFatalError));
+                }
+                Event::Timeout { .. } => {
+                    return Err(UploadError::Transfer(FileError::SessionTimeout));
+                }
+                Event::OutOfSync { expected, got } => {
+                    return Err(UploadError::Transfer(FileError::SessionOutOfSync {
+                        expected,
+                        got,
+                    }));
+                }
+                _ => {}
             }
         }
         session.tick(Instant::now());
@@ -120,7 +134,7 @@ where
         while let Some(out) = ft.poll_outbound() {
             transport.write_all(&out).await?;
         }
-        let n = transport.read(&mut buf).await?;
+        let n = read_with_timeout(transport, &mut buf, ft.response_timeout()).await?;
         if n > 0 {
             ft.feed(&buf[..n], Instant::now());
         }
@@ -150,7 +164,7 @@ where
         while let Some(out) = ft.poll_outbound() {
             transport.write_all(&out).await?;
         }
-        let n = transport.read(&mut buf).await?;
+        let n = read_with_timeout(transport, &mut buf, ft.response_timeout()).await?;
         if n > 0 {
             ft.feed(&buf[..n], Instant::now());
         }
@@ -165,4 +179,21 @@ where
         ft.tick(Instant::now());
     }
     Err(UploadError::Stalled("event did not arrive in time"))
+}
+
+/// Read with a per-call timeout so the surrounding drive loop can fall
+/// through to `tick()` and fire retransmits even when the transport
+/// stays quiet. Returns 0 on timeout (treated as "no bytes this turn").
+async fn read_with_timeout<T>(
+    transport: &mut T,
+    buf: &mut [u8],
+    timeout: Duration,
+) -> Result<usize, UploadError>
+where
+    T: AsyncRead + Unpin,
+{
+    match tokio::time::timeout(timeout, transport.read(buf)).await {
+        Ok(r) => r.map_err(UploadError::Io),
+        Err(_) => Ok(0),
+    }
 }
