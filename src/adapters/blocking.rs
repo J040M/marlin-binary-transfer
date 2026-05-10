@@ -98,7 +98,57 @@ pub fn upload<T: Read + Write + ?Sized, S: Read>(
     ft.close(Instant::now());
     drive_until_event(transport, &mut ft, |e| matches!(e, FileEvent::Closed))?;
 
+    // Drop the FT borrow so we can talk to the session directly to send
+    // the control CLOSE (proto=0, type=2) that drops the device back to
+    // ASCII mode. Without this, the printer remains in binary mode and
+    // subsequent ASCII g-code on the same serial session is ignored.
+    drop(ft);
+    session.send(0, 2, &[], Instant::now());
+    drive_session_until_idle(transport, &mut session)?;
+
     Ok(stats)
+}
+
+fn drive_session_until_idle<T: Read + Write + ?Sized>(
+    transport: &mut T,
+    session: &mut Session,
+) -> Result<(), UploadError> {
+    use crate::file_transfer::FileError;
+    use crate::session::Event;
+    let mut buf = [0u8; 1024];
+    for _ in 0..200 {
+        while let Some(out) = session.poll_outbound() {
+            transport.write_all(&out)?;
+        }
+        let n = match transport.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => 0,
+            Err(e) => return Err(UploadError::Io(e)),
+        };
+        if n > 0 {
+            session.feed(&buf[..n], Instant::now());
+        }
+        while let Some(evt) = session.poll_event() {
+            match evt {
+                Event::Ack(_) => return Ok(()),
+                Event::FatalError => {
+                    return Err(UploadError::Transfer(FileError::SessionFatalError));
+                }
+                Event::Timeout { .. } => {
+                    return Err(UploadError::Transfer(FileError::SessionTimeout));
+                }
+                Event::OutOfSync { expected, got } => {
+                    return Err(UploadError::Transfer(FileError::SessionOutOfSync {
+                        expected,
+                        got,
+                    }));
+                }
+                _ => {}
+            }
+        }
+        session.tick(Instant::now());
+    }
+    Err(UploadError::Stalled("control close not acked"))
 }
 
 fn drive_session_until_synced<T: Read + Write + ?Sized>(

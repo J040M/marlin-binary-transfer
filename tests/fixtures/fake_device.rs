@@ -61,6 +61,7 @@ pub struct FakeDevice {
     pub written_bytes: Vec<u8>,
     pub aborted: bool,
     pub closed: bool,
+    pub control_closed: bool,
 }
 
 impl FakeDevice {
@@ -79,6 +80,7 @@ impl FakeDevice {
             written_bytes: Vec::new(),
             aborted: false,
             closed: false,
+            control_closed: false,
         }
     }
 
@@ -154,7 +156,9 @@ impl FakeDevice {
                 ));
             }
             (0, 2) => {
-                // Control CLOSE.
+                // Control CLOSE — device exits binary mode and returns
+                // to ASCII g-code processing.
+                self.control_closed = true;
                 self.write_line(&format!("ok{}", pkt.sync));
             }
             // File-transfer plane.
