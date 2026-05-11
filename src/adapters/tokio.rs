@@ -4,6 +4,23 @@
 //! Mirrors [`adapters::blocking`](crate::adapters::blocking) one-for-one,
 //! returning the same [`UploadStats`] / [`UploadError`] types.
 //!
+//! # Read timeout
+//!
+//! Every inbound read is wrapped in
+//! [`tokio::time::timeout`](https://docs.rs/tokio/latest/tokio/time/fn.timeout.html)
+//! keyed to [`Session::response_timeout`](crate::session::Session::response_timeout).
+//! On `Elapsed` the adapter falls through to `tick()` so retransmits and the
+//! total-budget timeout still fire on a quiet transport. Without this wrapping
+//! a stalled peer would leave the future `Pending` forever.
+//!
+//! # Lifecycle handled for you
+//!
+//! 1. Send `M28 B1` to enter binary mode.
+//! 2. SYNC handshake.
+//! 3. QUERY → compression negotiation.
+//! 4. OPEN, WRITE × N, CLOSE.
+//! 5. Control CLOSE (proto=0, type=2) so the device exits binary mode.
+//!
 //! [`AsyncRead`]: tokio::io::AsyncRead
 //! [`AsyncWrite`]: tokio::io::AsyncWrite
 

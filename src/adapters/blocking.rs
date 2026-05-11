@@ -17,10 +17,30 @@
 //! # Ok(()) }
 //! ```
 //!
-//! The example uses any `Read + Write`. With the `serial` feature enabled,
+//! Any `Read + Write` works. With the `serial` feature enabled,
 //! [`serialport::SerialPort`](https://docs.rs/serialport/latest/serialport/trait.SerialPort.html)
-//! satisfies both traits and works directly; see
+//! satisfies both traits directly; see
 //! [`adapters::serialport`](crate::adapters::serialport) for an `open` helper.
+//!
+//! # Transport requirements
+//!
+//! `transport.read(..)` must return [`std::io::ErrorKind::TimedOut`] within a
+//! bounded interval when no data is available, so [`tick()`](crate::session::Session::tick)
+//! can fire retransmits. A blocking read with no timeout would deadlock the
+//! loop under packet loss. The
+//! [`adapters::serialport::open`](crate::adapters::serialport::open) helper
+//! configures a 100 ms read timeout out of the box; if you're plugging in a
+//! different transport (TCP-to-serial bridge, USB CDC via `rusb`, in-memory
+//! pipe) make sure it has the equivalent behaviour.
+//!
+//! # Lifecycle handled for you
+//!
+//! 1. Send `M28 B1` to enter binary mode.
+//! 2. SYNC handshake.
+//! 3. QUERY → compression negotiation.
+//! 4. OPEN, WRITE × N, CLOSE.
+//! 5. Control CLOSE (proto=0, type=2) so the device exits binary mode and
+//!    the same serial session can accept ASCII g-code again afterwards.
 
 use std::io::{Read, Write};
 use std::time::Instant;
