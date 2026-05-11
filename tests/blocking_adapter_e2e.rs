@@ -88,3 +88,83 @@ fn upload_sends_control_close_after_file_close() {
         "control CLOSE (proto=0,type=2) must be sent so device exits binary mode"
     );
 }
+
+/// Transport that responds with a single canned string regardless of
+/// what the host writes. Used to inject fatal-event paths the FakeDevice
+/// doesn't emit.
+struct CannedReplyTransport {
+    reply: Vec<u8>,
+}
+
+impl CannedReplyTransport {
+    fn new(reply: &[u8]) -> Self {
+        Self {
+            reply: reply.to_vec(),
+        }
+    }
+}
+
+impl Write for CannedReplyTransport {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Read for CannedReplyTransport {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.reply.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "idle"));
+        }
+        let n = buf.len().min(self.reply.len());
+        buf[..n].copy_from_slice(&self.reply[..n]);
+        self.reply.drain(..n);
+        Ok(n)
+    }
+}
+
+#[test]
+fn fatal_error_during_sync_surfaces_session_fatal_error() {
+    // Device responds with `fe` instead of the SYNC handshake reply.
+    // The adapter must surface this as Transfer(SessionFatalError),
+    // not the generic HandshakeFailed after 200 spin iterations.
+    use marlin_binary_transfer::adapters::blocking::UploadError;
+    use marlin_binary_transfer::file_transfer::FileError;
+
+    let mut transport = CannedReplyTransport::new(b"fe\n");
+    let opts = UploadOptions {
+        dest_filename: "out.gco".into(),
+        compression: Compression::None,
+        dummy: false,
+        chunk_size: 0,
+    };
+    let err = upload(&mut transport, &b""[..], opts).expect_err("expected fatal");
+    match err {
+        UploadError::Transfer(FileError::SessionFatalError) => {}
+        other => panic!("expected SessionFatalError, got {other:?}"),
+    }
+}
+
+#[test]
+fn out_of_sync_during_sync_surfaces_specific_error() {
+    use marlin_binary_transfer::adapters::blocking::UploadError;
+    use marlin_binary_transfer::file_transfer::FileError;
+
+    // Device acks with a wrong sync number instead of the expected ss
+    // handshake reply. Session emits OutOfSync; adapter must surface
+    // that variant rather than the generic HandshakeFailed.
+    let mut transport = CannedReplyTransport::new(b"ok99\n");
+    let opts = UploadOptions {
+        dest_filename: "out.gco".into(),
+        compression: Compression::None,
+        dummy: false,
+        chunk_size: 0,
+    };
+    let err = upload(&mut transport, &b""[..], opts).expect_err("expected out-of-sync");
+    match err {
+        UploadError::Transfer(FileError::SessionOutOfSync { .. }) => {}
+        other => panic!("expected SessionOutOfSync, got {other:?}"),
+    }
+}

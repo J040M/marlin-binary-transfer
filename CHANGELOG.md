@@ -7,8 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `file_transfer`: state-gate `pending_ascii` setters for every `PFT:*`
+  variant. Previously a stray `PFT:busy`/`fail`/`ioerror`/`invalid`/`version`
+  line arriving while `AwaitingWriteAck` would corrupt that slot and cause
+  the legitimate `ok<n>` to be silently swallowed; the next `write()` would
+  then panic with state still `AwaitingWriteAck`. Now out-of-context PFT
+  lines are cleanly ignored.
+- `adapters::tokio`: every `transport.read(..).await` is now wrapped in
+  `tokio::time::timeout(session.response_timeout(), ..)`. Without this,
+  a quiet transport meant the loop never reached `session.tick()`, so the
+  retransmit and total-budget timeouts were effectively dead code.
+- `adapters` (both blocking and tokio): `drive_session_until_synced` now
+  surfaces `FileError::SessionFatalError` / `SessionTimeout` /
+  `SessionOutOfSync` instead of always returning the generic
+  `UploadError::HandshakeFailed` after exhausting the retry budget.
+- `adapters` (both blocking and tokio): send the control-plane CLOSE
+  (proto=0, type=2) after a successful upload so the device exits binary
+  mode and resumes accepting ASCII g-code on the same serial session.
+  Previously the device remained in binary mode after `upload()` returned
+  `Ok`.
+
 ### Added
 
+- `Session::response_timeout()` / `Session::total_timeout()` and
+  `FileTransfer::response_timeout()` accessors so adapters and external
+  callers can bound their own I/O against the session's timing
+  configuration.
+- Tokio's `time` feature is now enabled by the `tokio` feature flag.
+- New integration test `tests/blocking_adapter_e2e.rs` driving the
+  blocking adapter against an in-memory `Read+Write` transport,
+  asserting the control CLOSE lands on the device.
 - Initial repository scaffold: dual MIT/Apache-2.0 license, README, CI
   scaffolding, module placeholders.
 - Codec layer (`codec`) — packet encode/decode, Fletcher-16 mod-255,

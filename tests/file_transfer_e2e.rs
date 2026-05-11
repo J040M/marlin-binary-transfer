@@ -525,6 +525,37 @@ fn back_to_back_writes_without_pump_panics() {
 }
 
 #[test]
+fn file_transfer_exposes_session_response_timeout() {
+    let mut session = Session::new().with_response_timeout(std::time::Duration::from_millis(250));
+    let ft = FileTransfer::new(&mut session);
+    assert_eq!(ft.response_timeout(), std::time::Duration::from_millis(250));
+}
+
+#[test]
+fn stray_pft_version_outside_query_state_is_ignored() {
+    // Regression for the state-gate on PFT:version. Previously a stray
+    // PFT:version line could overwrite pending_ascii outside QUERY.
+    let mut session = Session::new();
+    let mut device = FakeDevice::new(512, "1.0", 0);
+    complete_handshake(&mut session, &mut device);
+
+    let mut ft = FileTransfer::new(&mut session);
+    let now = Instant::now();
+    ft.query(Compression::None, now);
+    let _ = pump_until_event(&mut ft, &mut device, 10); // Negotiated, state=Negotiated
+
+    // State is now Negotiated. A stray PFT:version line here must NOT
+    // touch pending_ascii. Feed one, then open(), and verify the open
+    // happy path still works.
+    ft.feed(b"PFT:version:9.9:none\n", now);
+    ft.open("x.gco", false, now);
+    assert_eq!(
+        pump_until_event(&mut ft, &mut device, 10),
+        Some(FileEvent::Opened)
+    );
+}
+
+#[test]
 fn stray_pft_during_write_does_not_swallow_ack() {
     // Regression: a stray PFT line (busy/fail/ioerror/invalid/version)
     // arriving while we're in AwaitingWriteAck must not corrupt the
