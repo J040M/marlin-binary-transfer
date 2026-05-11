@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-05-11
+
+Initial public release.
+
 ### Fixed
 
 - `file_transfer`: state-gate `pending_ascii` setters for every `PFT:*`
@@ -58,7 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Criterion benches for codec encode/decode and Fletcher-16.
 - `cargo-fuzz` target for the decoder.
 
-[Unreleased]: https://github.com/J040M/marlin-binary-transfer/compare/HEAD...HEAD
+[Unreleased]: https://github.com/J040M/marlin-binary-transfer/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/J040M/marlin-binary-transfer/releases/tag/v0.1.0
 
 ## Acknowledgements
 
