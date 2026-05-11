@@ -13,7 +13,9 @@ ignore = []
 
 [licenses]
 version = 2
-# Accept the standard permissive set common in the Rust ecosystem.
+# Accept the standard permissive set common in the Rust ecosystem,
+# plus MPL-2.0 (weak copyleft, file-scoped — used by the `serialport`
+# crate).
 allow = [
     "MIT",
     "Apache-2.0",
@@ -21,6 +23,7 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
+    "MPL-2.0",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
@@ -28,6 +31,15 @@ allow = [
     "CC0-1.0",
 ]
 confidence-threshold = 0.9
+
+# `unescaper` v0.1.8 (a transitive dep via `serialport`) declares its
+# license as the deprecated SPDX form `GPL-3.0/MIT`, which cargo-deny
+# can't parse. The intent is "GPL-3.0 OR MIT" (slash was the legacy
+# OR-syntax). We elect MIT explicitly so we don't accept GPL.
+[[licenses.clarify]]
+crate = "unescaper"
+expression = "MIT"
+license-files = []
 
 [bans]
 multiple-versions = "warn"
