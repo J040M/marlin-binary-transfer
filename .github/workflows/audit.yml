@@ -1,0 +1,38 @@
+name: Security audit
+
+on:
+  push:
+    branches: [master, develop]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/audit.yml
+      - deny.toml
+  pull_request:
+    branches: [master, develop]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/audit.yml
+      - deny.toml
+  schedule:
+    # Weekly run catches advisories filed against transitive deps that
+    # we haven't touched ourselves.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # advisories — RustSec advisory database
+          # bans       — license / source / multiple-versions policy
+          # sources    — registry / git source allowlist
+          command: check advisories bans sources

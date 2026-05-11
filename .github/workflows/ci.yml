@@ -5,14 +5,24 @@ on:
     branches: [master, develop]
   pull_request:
     branches: [master, develop]
+  schedule:
+    # Daily run to catch nightly regressions and dep drift.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# Cancel superseded runs on the same ref. PRs that get force-pushed don't
+# pile up minutes of cancelled work.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   fmt:
-    name: cargo fmt
+    name: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +32,7 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    name: cargo clippy
+    name: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,8 +42,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings --cfg docsrs"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --all-features
+
   test:
-    name: cargo test (${{ matrix.features }})
+    name: test (${{ matrix.features }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -53,8 +74,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test ${{ matrix.features }}
 
+  test-os:
+    # The feature matrix above runs Ubuntu-only to keep CI time reasonable.
+    # This job covers the cross-platform happy path on macOS and Windows
+    # with --all-features, where any platform-specific bug is most likely
+    # to surface (serialport crate quirks, tokio runtime differences).
+    name: test-os (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-features
+
   msrv:
-    name: cargo check (MSRV 1.75)
+    name: msrv
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,27 +100,57 @@ jobs:
         with:
           toolchain: "1.75.0"
       - uses: Swatinem/rust-cache@v2
-      # Lib-only check: dev-deps (criterion) pull in crates that require
-      # edition2024 (Rust 1.85+), so we can't compile the test/bench targets
-      # on MSRV. The library itself stays buildable on 1.75.
+      # Lib-only check: dev-deps (criterion, recent tokio) pull in crates
+      # that require a newer toolchain, so we can't compile the test or
+      # bench targets at MSRV. The library itself stays buildable on 1.75.
       - run: cargo check --all-features
 
-  doc:
-    name: cargo doc
+  minimal-versions:
+    # Verifies the crate compiles against the *minimum* semver-compatible
+    # versions of every transitive dependency. Catches missing version
+    # bumps when we rely on a feature added in a later patch release of
+    # a dep without declaring it.
+    name: minimal-versions
     runs-on: ubuntu-latest
-    env:
-      RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --no-deps --all-features
+      - name: Resolve minimal versions
+        run: cargo +nightly generate-lockfile -Z minimal-versions -Z direct-minimal-versions
+      - name: Build with minimal versions
+        run: cargo +stable build --all-features --locked
 
   publish-dry-run:
-    name: cargo publish --dry-run
+    name: publish-dry-run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo publish --dry-run --all-features
+
+  # Single status check downstream automation (branch protection, merge
+  # queues) can require. Updates only after every other CI job passes.
+  ci-success:
+    name: CI success
+    if: always()
+    needs:
+      - fmt
+      - clippy
+      - docs
+      - test
+      - test-os
+      - msrv
+      - minimal-versions
+      - publish-dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide overall status
+        run: |
+          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+            echo "One or more required jobs failed or were cancelled."
+            exit 1
+          fi
+          echo "All required CI jobs passed."
