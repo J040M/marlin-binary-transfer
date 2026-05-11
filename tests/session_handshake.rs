@@ -256,6 +256,30 @@ fn reset_preserves_configured_timeouts() {
 }
 
 #[test]
+fn response_timeout_accessor_returns_configured_value() {
+    let custom = Duration::from_millis(345);
+    let s = Session::new().with_response_timeout(custom);
+    assert_eq!(s.response_timeout(), custom);
+}
+
+#[test]
+fn total_timeout_accessor_returns_configured_value() {
+    let custom = Duration::from_millis(67_890);
+    let s = Session::new().with_total_timeout(custom);
+    assert_eq!(s.total_timeout(), custom);
+}
+
+#[test]
+fn response_timeout_has_a_sensible_default() {
+    let s = Session::new();
+    // We don't assert a specific value (it's a tuning knob), but it
+    // must be non-zero so adapters that wrap reads in this duration
+    // don't busy-loop.
+    assert!(s.response_timeout() > Duration::from_millis(0));
+    assert!(s.total_timeout() >= s.response_timeout());
+}
+
+#[test]
 fn ss_with_garbage_does_not_panic() {
     let mut s = Session::new();
     s.feed(b"ss not a comma list\n", Instant::now());
