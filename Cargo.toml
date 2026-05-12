@@ -1,6 +1,6 @@
 [package]
 name = "marlin-binary-transfer"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "Host-side implementation of Marlin's Binary File Transfer Mark II protocol for SD-card upload to 3D printers."

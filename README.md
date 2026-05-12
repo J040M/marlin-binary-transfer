@@ -69,6 +69,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compression: Compression::Auto,
         dummy: false,
         chunk_size: 0, // 0 = use the device-advertised maximum
+        progress: Some(Box::new(|p| {
+            eprintln!("  {} chunks, {} bytes", p.chunks_sent, p.bytes_sent);
+        })),
     })?;
 
     println!(

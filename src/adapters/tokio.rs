@@ -32,13 +32,13 @@ use crate::adapters::common::resolve_chunk_size;
 use crate::file_transfer::{Compression, FileEvent, FileTransfer};
 use crate::session::Session;
 
-pub use crate::adapters::common::{UploadError, UploadOptions, UploadStats};
+pub use crate::adapters::common::{Progress, ProgressCallback, UploadError, UploadOptions, UploadStats};
 
 /// Async equivalent of [`adapters::blocking::upload`](crate::adapters::blocking::upload).
 pub async fn upload<T, S>(
     transport: &mut T,
     src: &mut S,
-    options: UploadOptions,
+    mut options: UploadOptions,
 ) -> Result<UploadStats, UploadError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
@@ -93,6 +93,13 @@ where
         drive_until(transport, &mut ft, |e| matches!(e, FileEvent::WriteAcked)).await?;
         stats.bytes_sent += chunk.len() as u64;
         stats.chunks_sent += 1;
+        if let Some(cb) = options.progress.as_mut() {
+            cb(Progress {
+                bytes_sent: stats.bytes_sent,
+                chunks_sent: stats.chunks_sent,
+                source_bytes: stats.source_bytes,
+            });
+        }
     }
 
     ft.close(Instant::now());

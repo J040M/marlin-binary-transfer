@@ -63,6 +63,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compression,
         dummy: false,
         chunk_size: 0,
+        progress: Some(Box::new(|p| {
+            eprintln!(
+                "  progress: {} chunks, {} bytes sent",
+                p.chunks_sent, p.bytes_sent
+            );
+        })),
     };
     let stats = upload(&mut *transport, file, opts)?;
     eprintln!(

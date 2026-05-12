@@ -97,6 +97,7 @@ async fn tokio_upload_sends_control_close_after_file_close() {
         compression: Compression::None,
         dummy: false,
         chunk_size: 0,
+        progress: None,
     };
     let stats = upload(&mut transport, &mut src, opts)
         .await
@@ -146,6 +147,37 @@ impl AsyncRead for DeadTransport {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn tokio_progress_callback_fires_once_per_chunk() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let device = Rc::new(RefCell::new(FakeDevice::new(512, "1.0", 0)));
+    let mut transport = AsyncDeviceTransport::new(device.clone());
+    let payload = vec![b'G'; 256];
+    let mut src: &[u8] = &payload[..];
+    let chunks = Arc::new(AtomicU64::new(0));
+    let bytes = Arc::new(AtomicU64::new(0));
+    let chunks_cb = Arc::clone(&chunks);
+    let bytes_cb = Arc::clone(&bytes);
+    let opts = UploadOptions {
+        dest_filename: "out.gco".into(),
+        compression: Compression::None,
+        dummy: false,
+        chunk_size: 64,
+        progress: Some(Box::new(move |p| {
+            chunks_cb.store(p.chunks_sent, Ordering::SeqCst);
+            bytes_cb.store(p.bytes_sent, Ordering::SeqCst);
+        })),
+    };
+    let stats = upload(&mut transport, &mut src, opts)
+        .await
+        .expect("upload");
+    assert_eq!(stats.chunks_sent, 4);
+    assert_eq!(chunks.load(Ordering::SeqCst), 4);
+    assert_eq!(bytes.load(Ordering::SeqCst), 256);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn tokio_dead_transport_does_not_deadlock() {
     // With paused time, tokio::time::timeout auto-advances the clock
     // each await. So 200 iterations * response_timeout completes
@@ -158,6 +190,7 @@ async fn tokio_dead_transport_does_not_deadlock() {
         compression: Compression::None,
         dummy: false,
         chunk_size: 0,
+        progress: None,
     };
     let err = upload(&mut transport, &mut src, opts)
         .await

@@ -77,6 +77,7 @@ fn upload_sends_control_close_after_file_close() {
         compression: Compression::None,
         dummy: false,
         chunk_size: 0,
+        progress: None,
     };
     let stats = upload(&mut transport, &payload[..], opts).expect("upload");
 
@@ -139,12 +140,42 @@ fn fatal_error_during_sync_surfaces_session_fatal_error() {
         compression: Compression::None,
         dummy: false,
         chunk_size: 0,
+        progress: None,
     };
     let err = upload(&mut transport, &b""[..], opts).expect_err("expected fatal");
     match err {
         UploadError::Transfer(FileError::SessionFatalError) => {}
         other => panic!("expected SessionFatalError, got {other:?}"),
     }
+}
+
+#[test]
+fn progress_callback_fires_once_per_chunk() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let device = Rc::new(RefCell::new(FakeDevice::new(512, "1.0", 0)));
+    let mut transport = DeviceTransport::new(device.clone());
+    // 256 bytes / 64-byte chunks = 4 WRITE packets → 4 callback fires.
+    let payload = vec![b'G'; 256];
+    let chunks = Arc::new(AtomicU64::new(0));
+    let bytes = Arc::new(AtomicU64::new(0));
+    let chunks_cb = Arc::clone(&chunks);
+    let bytes_cb = Arc::clone(&bytes);
+    let opts = UploadOptions {
+        dest_filename: "out.gco".into(),
+        compression: Compression::None,
+        dummy: false,
+        chunk_size: 64,
+        progress: Some(Box::new(move |p| {
+            chunks_cb.store(p.chunks_sent, Ordering::SeqCst);
+            bytes_cb.store(p.bytes_sent, Ordering::SeqCst);
+        })),
+    };
+    let stats = upload(&mut transport, &payload[..], opts).expect("upload");
+    assert_eq!(stats.chunks_sent, 4);
+    assert_eq!(chunks.load(Ordering::SeqCst), 4);
+    assert_eq!(bytes.load(Ordering::SeqCst), 256);
 }
 
 #[test]
@@ -161,6 +192,7 @@ fn out_of_sync_during_sync_surfaces_specific_error() {
         compression: Compression::None,
         dummy: false,
         chunk_size: 0,
+        progress: None,
     };
     let err = upload(&mut transport, &b""[..], opts).expect_err("expected out-of-sync");
     match err {

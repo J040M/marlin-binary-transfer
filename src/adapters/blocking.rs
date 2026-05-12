@@ -49,7 +49,7 @@ use crate::adapters::common::resolve_chunk_size;
 use crate::file_transfer::{Compression, FileEvent, FileTransfer};
 use crate::session::Session;
 
-pub use crate::adapters::common::{UploadError, UploadOptions, UploadStats};
+pub use crate::adapters::common::{Progress, ProgressCallback, UploadError, UploadOptions, UploadStats};
 
 /// Perform a complete upload: SYNC, QUERY, OPEN, WRITE×N, CLOSE.
 ///
@@ -57,7 +57,7 @@ pub use crate::adapters::common::{UploadError, UploadOptions, UploadStats};
 pub fn upload<T: Read + Write + ?Sized, S: Read>(
     transport: &mut T,
     mut src: S,
-    options: UploadOptions,
+    mut options: UploadOptions,
 ) -> Result<UploadStats, UploadError> {
     // Send the binary-mode trigger as plain ASCII first.
     transport.write_all(b"M28B1\n")?;
@@ -113,6 +113,13 @@ pub fn upload<T: Read + Write + ?Sized, S: Read>(
         drive_until_event(transport, &mut ft, |e| matches!(e, FileEvent::WriteAcked))?;
         stats.bytes_sent += chunk.len() as u64;
         stats.chunks_sent += 1;
+        if let Some(cb) = options.progress.as_mut() {
+            cb(Progress {
+                bytes_sent: stats.bytes_sent,
+                chunks_sent: stats.chunks_sent,
+                source_bytes: stats.source_bytes,
+            });
+        }
     }
 
     ft.close(Instant::now());

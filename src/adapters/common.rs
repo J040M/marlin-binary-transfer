@@ -35,8 +35,27 @@ pub(crate) fn resolve_chunk_size(requested: usize, device_max: u16) -> usize {
     }
 }
 
+/// Per-chunk progress payload passed to a [`ProgressCallback`]. Values are
+/// cumulative across the upload.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Progress {
+    /// Bytes sent so far across all WRITE packets (post-compression).
+    pub bytes_sent: u64,
+    /// Number of WRITE packets acknowledged so far.
+    pub chunks_sent: u64,
+    /// Total bytes read from `src` (constant across calls within one upload).
+    pub source_bytes: u64,
+}
+
+/// Closure type the adapters invoke after each acknowledged WRITE packet.
+/// Boxed for object safety; `Send` so async callers can ship the callback
+/// into `spawn_blocking`.
+pub type ProgressCallback = Box<dyn FnMut(Progress) + Send>;
+
 /// Caller-supplied options controlling the upload.
-#[derive(Debug, Clone)]
+///
+/// Not `Clone` because [`progress`](Self::progress) holds a `FnMut` closure.
+/// `Debug` is implemented manually for the same reason.
 pub struct UploadOptions {
     /// Destination filename on the device's SD card. Required.
     pub dest_filename: String,
@@ -49,6 +68,21 @@ pub struct UploadOptions {
     /// after the SYNC handshake completes. `0` means "use the device's
     /// max_block_size verbatim".
     pub chunk_size: usize,
+    /// Optional per-chunk progress callback fired once after each
+    /// acknowledged WRITE. See [`Progress`] for the payload.
+    pub progress: Option<ProgressCallback>,
+}
+
+impl std::fmt::Debug for UploadOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UploadOptions")
+            .field("dest_filename", &self.dest_filename)
+            .field("compression", &self.compression)
+            .field("dummy", &self.dummy)
+            .field("chunk_size", &self.chunk_size)
+            .field("progress", &self.progress.as_ref().map(|_| "<callback>"))
+            .finish()
+    }
 }
 
 impl Default for UploadOptions {
@@ -58,6 +92,7 @@ impl Default for UploadOptions {
             compression: Compression::None,
             dummy: false,
             chunk_size: 0,
+            progress: None,
         }
     }
 }
