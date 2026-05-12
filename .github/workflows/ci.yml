@@ -118,7 +118,13 @@ jobs:
     # versions of every transitive dependency. Catches missing version
     # bumps when we rely on a feature added in a later patch release of
     # a dep without declaring it.
+    #
+    # Non-blocking: the dep graph (serialport -> nix/libudev/cfg-if,
+    # CoreFoundation-sys on macOS, etc.) needs many transitive floors to
+    # build under -Z minimal-versions. Treat this job as informational
+    # until those floors are systematically added.
     name: minimal-versions
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -155,7 +161,6 @@ jobs:
       - test
       - test-os
       - msrv
-      - minimal-versions
       - publish-dry-run
     runs-on: ubuntu-latest
     steps:

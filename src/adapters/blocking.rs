@@ -49,7 +49,9 @@ use crate::adapters::common::resolve_chunk_size;
 use crate::file_transfer::{Compression, FileEvent, FileTransfer};
 use crate::session::Session;
 
-pub use crate::adapters::common::{Progress, ProgressCallback, UploadError, UploadOptions, UploadStats};
+pub use crate::adapters::common::{
+    Progress, ProgressCallback, UploadError, UploadOptions, UploadStats,
+};
 
 /// Perform a complete upload: SYNC, QUERY, OPEN, WRITE×N, CLOSE.
 ///
