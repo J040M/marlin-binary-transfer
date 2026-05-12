@@ -63,11 +63,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         compression,
         dummy: false,
         chunk_size: 0,
-        progress: Some(Box::new(|p| {
-            eprintln!(
+        progress: Some(Box::new(|p| match p.percent() {
+            Some(pct) => eprintln!(
+                "  progress: {:>5.1}% ({} chunks, {}/{} bytes)",
+                pct, p.chunks_sent, p.bytes_sent, p.source_bytes
+            ),
+            None => eprintln!(
                 "  progress: {} chunks, {} bytes sent",
                 p.chunks_sent, p.bytes_sent
-            );
+            ),
         })),
     };
     let stats = upload(&mut *transport, file, opts)?;

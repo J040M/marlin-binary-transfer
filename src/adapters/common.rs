@@ -47,6 +47,28 @@ pub struct Progress {
     pub source_bytes: u64,
 }
 
+impl Progress {
+    /// Fraction of the source uploaded so far, in `[0.0, 1.0]`. Returns
+    /// `None` when `source_bytes` is `0` (zero-length upload — undefined
+    /// ratio). With compression enabled `bytes_sent` is the post-compression
+    /// wire count, so this ratio can exceed `source_bytes` only if the
+    /// compressor expands the data; the result is clamped to `1.0`.
+    pub fn fraction(&self) -> Option<f32> {
+        if self.source_bytes == 0 {
+            return None;
+        }
+        let f = self.bytes_sent as f32 / self.source_bytes as f32;
+        Some(f.min(1.0))
+    }
+
+    /// Percent uploaded, in `[0.0, 100.0]`. Returns `None` when
+    /// `source_bytes` is `0`. See [`Progress::fraction`] for the
+    /// compression caveat.
+    pub fn percent(&self) -> Option<f32> {
+        self.fraction().map(|f| f * 100.0)
+    }
+}
+
 /// Closure type the adapters invoke after each acknowledged WRITE packet.
 /// Boxed for object safety; `Send` so async callers can ship the callback
 /// into `spawn_blocking`.
@@ -170,5 +192,49 @@ mod tests {
     #[test]
     fn requested_equal_to_max_is_honored() {
         assert_eq!(resolve_chunk_size(512, 512), 512);
+    }
+
+    #[test]
+    fn progress_percent_zero_source_is_none() {
+        let p = Progress {
+            bytes_sent: 0,
+            chunks_sent: 0,
+            source_bytes: 0,
+        };
+        assert!(p.percent().is_none());
+        assert!(p.fraction().is_none());
+    }
+
+    #[test]
+    fn progress_percent_halfway() {
+        let p = Progress {
+            bytes_sent: 500,
+            chunks_sent: 5,
+            source_bytes: 1000,
+        };
+        assert_eq!(p.fraction(), Some(0.5));
+        assert_eq!(p.percent(), Some(50.0));
+    }
+
+    #[test]
+    fn progress_percent_complete() {
+        let p = Progress {
+            bytes_sent: 1000,
+            chunks_sent: 10,
+            source_bytes: 1000,
+        };
+        assert_eq!(p.percent(), Some(100.0));
+    }
+
+    #[test]
+    fn progress_percent_clamps_when_expanded_by_compression() {
+        // If compression expands the payload, bytes_sent can exceed source_bytes.
+        // We clamp to 100% rather than report >100%, which would confuse UIs.
+        let p = Progress {
+            bytes_sent: 1500,
+            chunks_sent: 15,
+            source_bytes: 1000,
+        };
+        assert_eq!(p.percent(), Some(100.0));
     }
 }
