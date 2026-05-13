@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-13
+
+### Added
+
+- `adapters::{blocking,tokio}::UploadOptions.progress` — optional
+  `Box<dyn FnMut(Progress) + Send>` callback fired once after each
+  acknowledged WRITE. The `Progress` payload exposes cumulative
+  `bytes_sent`, `chunks_sent` and `source_bytes` so callers can drive
+  their own UI / rate calculations.
+
+### Changed
+
+- `UploadOptions` no longer derives `Clone` (the new `progress` field
+  holds a `FnMut` closure). `Debug` is preserved via a manual impl, so
+  the existing `..UploadOptions::default()` patterns keep working.
+
+### Yanked
+
+- 0.1.1 was published with experimental `Progress::percent()` /
+  `fraction()` helpers and immediately yanked. 0.1.2 ships the same
+  progress callback without those helpers.
+
 ## [0.1.0] - 2026-05-11
 
 Initial public release.
@@ -62,7 +84,8 @@ Initial public release.
 - Criterion benches for codec encode/decode and Fletcher-16.
 - `cargo-fuzz` target for the decoder.
 
-[Unreleased]: https://github.com/J040M/marlin-binary-transfer/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/J040M/marlin-binary-transfer/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/J040M/marlin-binary-transfer/releases/tag/v0.1.2
 [0.1.0]: https://github.com/J040M/marlin-binary-transfer/releases/tag/v0.1.0
 
 ## Acknowledgements
