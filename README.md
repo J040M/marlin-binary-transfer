@@ -70,9 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dummy: false,
         chunk_size: 0, // 0 = use the device-advertised maximum
         progress: Some(Box::new(|p| {
-            // Progress has bytes_sent/chunks_sent/source_bytes plus
-            // p.percent() -> Option<f32> in 0..=100 (None for empty source).
-            eprintln!("  {:>5.1}%", p.percent().unwrap_or(0.0));
+            eprintln!("  {} chunks, {} bytes", p.chunks_sent, p.bytes_sent);
         })),
     })?;
 
